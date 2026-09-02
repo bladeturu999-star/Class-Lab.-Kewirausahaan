@@ -1,7 +1,5 @@
 window.APP_CONFIG = {
-  // Isi dua nilai ini setelah membuat project Supabase.
-  // Selama masih kosong, aplikasi otomatis berjalan dalam Demo Mode.
-  supabaseUrl: '',
-  supabaseAnonKey: '',
+  supabaseUrl: 'https://uemwwcdzxudbaihszhpr.supabase.co',
+  supabaseAnonKey: 'sb_publishable_pwxoDUuyFVT8yzHXsQW6Pg_AaxQLal',
   className: 'Lab. Kewirausahaan II'
 };
