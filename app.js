@@ -2,7 +2,7 @@ const APP = document.getElementById('app');
 const TOAST = document.getElementById('toast');
 const CONFIG = window.APP_CONFIG || {};
 const DEMO_KEY = 'venture-dashboard-v3-demo-class';
-const APP_VERSION = '3.2';
+const APP_VERSION = '3.3';
 
 const REAL_READY = Boolean(
   CONFIG.supabaseUrl &&
@@ -29,6 +29,7 @@ const MODULES = [
 
 const STUDENT_NAV = [
   ['overview', 'Overview', '⌂'],
+  ['submission', 'Submit Mingguan', '✓'],
   ['health', '01 Health Check', '01'],
   ['kpi', '02 Baseline KPI', '02'],
   ['problem', '03 Problem Tree', '03'],
@@ -56,6 +57,7 @@ let runtime = {
   activePage: 'overview',
   selectedStudent: null,
   selectedStudentTab: 'overview',
+  selectedReviewWeek: null,
   authTab: 'login',
   demoStudentId: null,
   submissions: [],
@@ -746,7 +748,8 @@ async function realLogout() {
     submissions: [],
     feedback: [],
     activePage: 'overview',
-    selectedStudent: null
+    selectedStudent: null,
+    selectedReviewWeek: null
   };
 
   renderAuth();
@@ -767,6 +770,8 @@ async function loadRealUser(user) {
   runtime.mode = 'real';
   runtime.profile = profile;
   runtime.role = profile.role;
+  runtime.selectedStudent = null;
+  runtime.selectedReviewWeek = null;
   runtime.activePage = profile.role === 'lecturer'
     ? 'class'
     : 'overview';
@@ -1102,6 +1107,8 @@ function enterDemo(role) {
     ? 'class'
     : 'overview';
   runtime.classData = demo.students;
+  runtime.selectedStudent = null;
+  runtime.selectedReviewWeek = null;
 
   if (role === 'lecturer') {
     runtime.profile = demo.lecturer;
@@ -1224,6 +1231,7 @@ function renderApp() {
 function topbar() {
   const studentTitles = {
     overview: 'My Venture Dashboard',
+    submission: 'Submit Progress Mingguan',
     health: 'Health Check',
     kpi: 'Baseline KPI',
     problem: 'Problem Tree',
@@ -1338,6 +1346,8 @@ function renderPage() {
 
 function renderStudentPage() {
   switch (runtime.activePage) {
+    case 'submission':
+      return renderWeeklySubmissionPage();
     case 'health':
       return renderHealth();
     case 'kpi':
@@ -1870,16 +1880,66 @@ function prettyDate(iso) {
   }
 }
 
+
+function buildWeeklySnapshot(week) {
+  return {
+    captured_at: nowISO(),
+    week: Number(week),
+    venture: {
+      venture_name: runtime.venture?.venture_name || '',
+      category: runtime.venture?.category || '',
+      description: runtime.venture?.description || ''
+    },
+    modules: JSON.parse(JSON.stringify(runtime.modules || {}))
+  };
+}
+
+function snapshotModuleCount(snapshot) {
+  const modules = snapshot?.modules || {};
+  return Object.keys(modules).filter(
+    key => MODULES.includes(key)
+  ).length;
+}
+
+async function saveAllModulesSilently() {
+  clearTimeout(saveTimer);
+
+  for (const module of MODULES) {
+    const ok = await saveRealModule(module, true);
+    if (!ok) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 async function submitWeek(week) {
+  if (!sprintHasData(week)) {
+    toast(`Isi Weekly Sprint Week ${week} terlebih dahulu sebagai anchor submission.`);
+    return;
+  }
+
+  const existing = submissionFor(week);
+
+  if (existing?.status === 'reviewed') {
+    toast(`Week ${week} sudah direview dosen dan snapshot-nya dikunci.`);
+    return;
+  }
+
   if (runtime.mode === 'demo') {
-    const existing = submissionFor(week);
+    const now = nowISO();
+    const snapshot = buildWeeklySnapshot(week);
+
     const row = {
       venture_id: runtime.venture.id,
-      week,
+      week: Number(week),
       status: 'submitted',
-      submitted_at: existing?.submitted_at || nowISO(),
+      submitted_at: existing?.submitted_at || now,
       reviewed_at: null,
-      updated_at: nowISO()
+      updated_at: now,
+      snapshot,
+      snapshot_version: 1
     };
 
     const index = runtime.submissions.findIndex(
@@ -1898,12 +1958,14 @@ async function submitWeek(week) {
     );
 
     if (studentIndex >= 0) {
+      demo.students[studentIndex].modules = runtime.modules;
       demo.students[studentIndex].submissions = runtime.submissions;
+      demo.students[studentIndex].updatedAt = now;
       saveDemo(demo);
     }
 
     renderApp();
-    toast(`Week ${week} berhasil disubmit`);
+    toast(`Week ${week} berhasil disubmit sebagai snapshot seluruh toolkit`);
     return;
   }
 
@@ -1917,21 +1979,15 @@ async function submitWeek(week) {
     return;
   }
 
-  if (!sprintHasData(week)) {
-    toast(`Isi Weekly Sprint Week ${week} terlebih dahulu.`);
+  const allSaved = await saveAllModulesSilently();
+
+  if (!allSaved) {
+    toast('Ada modul yang gagal tersimpan. Submission dibatalkan.');
     return;
   }
-
-  const existing = submissionFor(week);
-
-  if (existing?.status === 'reviewed') {
-    toast(`Week ${week} sudah direview dosen.`);
-    return;
-  }
-
-  await saveRealModule('sprint', true);
 
   const now = nowISO();
+  const snapshot = buildWeeklySnapshot(week);
 
   const payload = {
     venture_id: runtime.venture.id,
@@ -1939,7 +1995,9 @@ async function submitWeek(week) {
     status: 'submitted',
     submitted_at: existing?.submitted_at || now,
     reviewed_at: null,
-    updated_at: now
+    updated_at: now,
+    snapshot,
+    snapshot_version: 1
   };
 
   const { data, error } = await sb
@@ -1951,7 +2009,7 @@ async function submitWeek(week) {
     .single();
 
   if (error) {
-    console.error('[v3.1] submit error:', error);
+    console.error('[v3.3] submit snapshot error:', error);
     toast(`Gagal submit: ${error.message}`);
     return;
   }
@@ -1971,7 +2029,27 @@ async function submitWeek(week) {
   );
 
   renderApp();
-  toast(`Week ${week} berhasil disubmit`);
+  toast(`Week ${week} berhasil disubmit sebagai snapshot seluruh toolkit`);
+}
+
+function renderWeeklySubmissionPage() {
+  return `
+    <div class="card" style="margin-bottom:15px">
+      <h3>Submit Progress Mingguan</h3>
+      <p class="hint">
+        Setiap submission menyimpan snapshot seluruh data yang sedang ada
+        di Health Check, KPI, Problem Tree, Experiment, Customer Evidence,
+        Weekly Sprint, Financial, dan Portfolio.
+      </p>
+      <div class="note">
+        Setelah dosen menandai sebuah Week sebagai Reviewed,
+        snapshot minggu tersebut dikunci. Perubahan untuk minggu berikutnya
+        tidak akan mengubah histori minggu yang sudah direview.
+      </div>
+    </div>
+
+    ${renderSubmissionPanel()}
+  `;
 }
 
 function renderSubmissionPanel() {
@@ -1983,10 +2061,10 @@ function renderSubmissionPanel() {
     <div class="card" style="margin-bottom:15px">
       <div class="section-head">
         <div>
-          <h3>Weekly Submission</h3>
+          <h3>Weekly Submission — Snapshot Seluruh Toolkit</h3>
           <p>
-            Isi Weekly Sprint, tunggu autosave,
-            lalu submit agar dapat direview dosen.
+            Week yang disubmit akan menyimpan seluruh kondisi data venture
+            pada saat tombol Submit ditekan.
           </p>
         </div>
 
@@ -1997,17 +2075,18 @@ function renderSubmissionPanel() {
         const week = i + 1;
         const submission = submissionFor(week);
         const status = submission?.status || 'draft';
-        const hasData = sprintHasData(week);
+        const hasAnchor = sprintHasData(week);
         const feedback = feedbackFor(week);
 
-        let description = 'Sprint belum diisi.';
+        let description = 'Isi Weekly Sprint minggu ini terlebih dahulu.';
 
-        if (hasData && !submission) {
-          description = 'Sprint sudah terisi dan siap disubmit.';
+        if (hasAnchor && !submission) {
+          description = 'Siap menyimpan snapshot seluruh modul.';
         }
 
         if (submission?.submitted_at) {
-          description = `Dikirim ${prettyDate(submission.submitted_at)}`;
+          const moduleCount = snapshotModuleCount(submission.snapshot);
+          description = `Snapshot dikirim ${prettyDate(submission.submitted_at)} · ${moduleCount || 8} modul`;
         }
 
         return `
@@ -2021,7 +2100,7 @@ function renderSubmissionPanel() {
                 feedback.length
                   ? `
                     <div class="note" style="margin-top:8px">
-                      <b>Feedback dosen:</b><br>
+                      <b>Review dosen:</b><br>
                       ${feedback
                         .slice(0, 2)
                         .map(x => esc(x.message))
@@ -2046,13 +2125,13 @@ function renderSubmissionPanel() {
               <button
                 class="btn small"
                 onclick="submitWeek(${week})"
-                ${!hasData || status === 'reviewed' ? 'disabled' : ''}>
+                ${!hasAnchor || status === 'reviewed' ? 'disabled' : ''}>
                 ${
                   status === 'reviewed'
-                    ? 'Reviewed'
+                    ? 'Dikunci'
                     : status === 'submitted'
-                      ? 'Submit Ulang'
-                      : 'Submit'
+                      ? 'Update Snapshot'
+                      : 'Submit Semua'
                 }
               </button>
             </span>
@@ -2063,10 +2142,9 @@ function renderSubmissionPanel() {
   `;
 }
 
+
 function renderSprint() {
   return `
-    ${renderSubmissionPanel()}
-
     <div class="section-head">
       <div>
         <h3>Weekly Sprint — 16 Weeks</h3>
@@ -2774,97 +2852,62 @@ function filterStudentTable(query) {
 function renderWeekly() {
   const students = runtime.classData || [];
 
-  const rows = students.map(student => {
-    const submissions = student.submissions || [];
-    const pending = submissions.filter(
-      x => x.status === 'submitted'
-    ).length;
-    const reviewed = submissions.filter(
-      x => x.status === 'reviewed'
-    ).length;
+  const submissionRows = [];
 
-    const latest = [...submissions].sort(
-      (a, b) => Number(b.week) - Number(a.week)
-    )[0];
+  students.forEach(student => {
+    (student.submissions || [])
+      .filter(row => ['submitted', 'reviewed'].includes(row.status))
+      .sort((a, b) => Number(b.week) - Number(a.week))
+      .forEach(row => {
+        submissionRows.push({
+          student,
+          submission: row
+        });
+      });
+  });
 
-    return `
-      <tr>
-        <td>
-          <b>${esc(student.profile.full_name)}</b>
-          <div class="subtle">
-            ${esc(student.profile.nim || '')}
-          </div>
-        </td>
+  submissionRows.sort((a, b) => {
+    const aTime = new Date(a.submission.submitted_at || 0).getTime();
+    const bTime = new Date(b.submission.submitted_at || 0).getTime();
+    return bTime - aTime;
+  });
 
-        <td>
-          ${esc(student.venture?.venture_name || 'Belum onboarding')}
-        </td>
+  const pending = submissionRows.filter(
+    item => item.submission.status === 'submitted'
+  ).length;
 
-        <td>W${currentWeek(student.modules) || 0}</td>
-        <td>${pending}</td>
-        <td>${reviewed}</td>
-
-        <td>
-          ${
-            latest
-              ? `
-                <span class="status ${submissionStatusClass(latest.status)}">
-                  W${latest.week} · ${submissionStatusLabel(latest.status)}
-                </span>
-              `
-              : `<span class="status neutral">Belum submit</span>`
-          }
-        </td>
-
-        <td>
-          <button class="btn small"
-                  onclick="openStudent('${student.id}')">
-            Detail
-          </button>
-        </td>
-      </tr>
-    `;
-  }).join('');
+  const reviewed = submissionRows.filter(
+    item => item.submission.status === 'reviewed'
+  ).length;
 
   return `
     <div class="grid kpis" style="margin-bottom:15px">
       <div class="card kpi-card">
         <div class="label">Pending Review</div>
-        <div class="value">
-          ${students.reduce(
-            (sum, s) =>
-              sum +
-              (s.submissions || []).filter(
-                x => x.status === 'submitted'
-              ).length,
-            0
-          )}
-        </div>
-        <div class="meta">submission menunggu review</div>
+        <div class="value">${pending}</div>
+        <div class="meta">snapshot mingguan menunggu review</div>
       </div>
 
       <div class="card kpi-card">
         <div class="label">Reviewed</div>
-        <div class="value good">
-          ${students.reduce(
-            (sum, s) =>
-              sum +
-              (s.submissions || []).filter(
-                x => x.status === 'reviewed'
-              ).length,
-            0
-          )}
-        </div>
-        <div class="meta">submission selesai direview</div>
+        <div class="value good">${reviewed}</div>
+        <div class="meta">snapshot mingguan selesai direview</div>
+      </div>
+
+      <div class="card kpi-card">
+        <div class="label">Total Submission</div>
+        <div class="value">${submissionRows.length}</div>
+        <div class="meta">seluruh snapshot yang masuk</div>
       </div>
     </div>
 
     <div class="card">
       <div class="section-head">
         <div>
-          <h3>Weekly Submission Status</h3>
+          <h3>Submission Mingguan Mahasiswa</h3>
           <p>
-            Status submission Week 1–16 dari mahasiswa.
+            Setiap baris adalah snapshot seluruh toolkit pada minggu
+            saat mahasiswa melakukan Submit.
           </p>
         </div>
       </div>
@@ -2875,28 +2918,76 @@ function renderWeekly() {
             <tr>
               <th>Mahasiswa</th>
               <th>Venture</th>
-              <th>Sprint</th>
-              <th>Pending</th>
-              <th>Reviewed</th>
-              <th>Latest</th>
+              <th>Week</th>
+              <th>Status</th>
+              <th>Submitted</th>
+              <th>Snapshot</th>
               <th></th>
             </tr>
           </thead>
 
           <tbody>
-            ${rows || `
-              <tr>
-                <td colspan="7">
-                  Belum ada mahasiswa.
-                </td>
-              </tr>
-            `}
+            ${
+              submissionRows.length
+                ? submissionRows.map(({ student, submission }) => `
+                    <tr>
+                      <td>
+                        <b>${esc(student.profile.full_name)}</b>
+                        <div class="subtle">
+                          ${esc(student.profile.nim || '')}
+                        </div>
+                      </td>
+
+                      <td>
+                        ${esc(student.venture?.venture_name || '-')}
+                      </td>
+
+                      <td><b>Week ${submission.week}</b></td>
+
+                      <td>
+                        <span class="status ${submissionStatusClass(submission.status)}">
+                          ${submissionStatusLabel(submission.status)}
+                        </span>
+                      </td>
+
+                      <td>
+                        ${prettyDate(submission.submitted_at)}
+                      </td>
+
+                      <td>
+                        ${snapshotModuleCount(submission.snapshot) || 8} modul
+                      </td>
+
+                      <td>
+                        <button
+                          class="btn small ${submission.status === 'submitted' ? 'primary' : ''}"
+                          onclick="openWeeklyReview('${student.id}',${submission.week})">
+                          ${
+                            submission.status === 'reviewed'
+                              ? 'Lihat Review'
+                              : 'Review'
+                          }
+                        </button>
+                      </td>
+                    </tr>
+                  `).join('')
+                : `
+                  <tr>
+                    <td colspan="7">
+                      <div class="empty">
+                        Belum ada submission mingguan.
+                      </div>
+                    </td>
+                  </tr>
+                `
+            }
           </tbody>
         </table>
       </div>
     </div>
   `;
 }
+
 
 function renderAnalytics() {
   const sorted = [...runtime.classData].sort(
@@ -3063,7 +3154,7 @@ function attentionList() {
 
 
 /* ============================================================
-   LECTURER REVIEW ACTIONS
+   LECTURER WEEKLY SNAPSHOT REVIEW
    ============================================================ */
 
 function lecturerStudentById(studentId) {
@@ -3072,85 +3163,320 @@ function lecturerStudentById(studentId) {
   ) || null;
 }
 
-async function saveLecturerFeedback(studentId, week) {
-  if (runtime.role !== 'lecturer') {
-    toast('Hanya dosen yang dapat memberi feedback.');
-    return;
-  }
-
+function openWeeklyReview(studentId, week) {
   const student = lecturerStudentById(studentId);
 
-  if (!student?.venture?.id) {
-    toast('Venture mahasiswa belum tersedia.');
+  if (!student) {
+    toast('Mahasiswa tidak ditemukan.');
     return;
   }
 
-  const input = document.getElementById(
-    `feedback-${studentId}-${week}`
-  );
-
-  const message = String(input?.value || '').trim();
-
-  if (!message) {
-    toast('Tulis feedback terlebih dahulu.');
-    return;
-  }
-
-  if (runtime.mode === 'demo') {
-    const row = {
-      id: `demo-feedback-${Date.now()}`,
-      venture_id: student.venture.id,
-      lecturer_id: runtime.profile.id,
-      module_name: 'sprint',
-      week: Number(week),
-      message,
-      created_at: nowISO()
-    };
-
-    student.feedback ??= [];
-    student.feedback.unshift(row);
-
-    const demo = loadDemo();
-    const index = demo.students.findIndex(
-      item => item.id === studentId
-    );
-
-    if (index >= 0) {
-      demo.students[index].feedback = student.feedback;
-      saveDemo(demo);
-    }
-
-    renderApp();
-    toast(`Feedback Week ${week} tersimpan`);
-    return;
-  }
-
-  const { data, error } = await sb
-    .from('lecturer_feedback')
-    .insert({
-      venture_id: student.venture.id,
-      lecturer_id: runtime.profile.id,
-      module_name: 'sprint',
-      week: Number(week),
-      message
-    })
-    .select()
-    .single();
-
-  if (error) {
-    console.error('[lecturer feedback]', error);
-    toast(`Gagal menyimpan feedback: ${error.message}`);
-    return;
-  }
-
-  student.feedback ??= [];
-  student.feedback.unshift(data);
-
+  runtime.selectedStudent = student;
+  runtime.selectedReviewWeek = Number(week);
+  runtime.selectedStudentTab = 'weeklySnapshot';
   renderApp();
-  toast(`Feedback Week ${week} tersimpan`);
 }
 
-async function markWeekReviewed(studentId, week) {
+function weeklySubmissionForStudent(student, week) {
+  return (student?.submissions || []).find(
+    row => Number(row.week) === Number(week)
+  ) || null;
+}
+
+function weeklyFeedbackForStudent(student, week) {
+  return (student?.feedback || [])
+    .filter(row => Number(row.week) === Number(week))
+    .sort(
+      (a, b) =>
+        new Date(b.created_at || 0) -
+        new Date(a.created_at || 0)
+    );
+}
+
+function weeklySnapshotModules(student, week) {
+  const submission = weeklySubmissionForStudent(student, week);
+  return submission?.snapshot?.modules || student?.modules || defaultModules(0);
+}
+
+function renderSnapshotMetricList(title, items) {
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <h3>${title}</h3>
+      ${items.map(([label, value]) => `
+        <div class="metric">
+          <span>${label}</span>
+          <strong style="
+            max-width:68%;
+            text-align:right;
+            white-space:normal;
+          ">
+            ${esc(filled(value) ? value : '-')}
+          </strong>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderSnapshotHealth(modules) {
+  const rows = modules?.health || [];
+
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <h3>01 · Health Check</h3>
+
+      ${rows.map(row => `
+        <div class="metric">
+          <span>
+            <b>${esc(row.area || '-')}</b>
+            <div class="subtle">
+              ${esc(row.question || '')}
+            </div>
+            <div class="subtle">
+              Evidence: ${esc(row.evidence || '-')}
+            </div>
+            <div class="subtle">
+              Action: ${esc(row.action || '-')}
+            </div>
+          </span>
+
+          <span class="score">
+            ${num(row.score) || 0}/5
+          </span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderSnapshotKPI(modules) {
+  const rows = modules?.kpi || [];
+
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <h3>02 · Baseline KPI</h3>
+
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>KPI</th>
+              <th>Baseline</th>
+              <th>Target</th>
+              <th>Unit</th>
+              <th>Period</th>
+              <th>Source</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            ${rows.map(row => `
+              <tr>
+                <td>
+                  <b>${esc(row.kpi || '-')}</b>
+                  <div class="subtle">
+                    ${esc(row.category || '')}
+                  </div>
+                </td>
+                <td>${esc(row.baseline || '-')}</td>
+                <td>${esc(row.target || '-')}</td>
+                <td>${esc(row.unit || '-')}</td>
+                <td>${esc(row.period || '-')}</td>
+                <td>${esc(row.source || '-')}</td>
+                <td>${esc(row.notes || '-')}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderSnapshotProblem(modules) {
+  const p = modules?.problem || {};
+
+  return renderSnapshotMetricList(
+    '03 · Problem Tree',
+    [
+      ['Core Problem', p.coreProblem],
+      ['Symptom', p.symptom],
+      ['WHY #1', p.why1],
+      ['WHY #2', p.why2],
+      ['WHY #3', p.why3],
+      ['Root Cause', p.rootCause],
+      ['Consequence', p.consequence],
+      ['Priority Problem', p.priorityProblem],
+      ['Next Sprint Hypothesis', p.hypothesis],
+      ['KPI', p.kpi],
+      ['Deadline', p.deadline]
+    ]
+  );
+}
+
+function renderSnapshotExperiment(modules) {
+  const e = modules?.experiment || {};
+
+  return renderSnapshotMetricList(
+    '04 · Experiment Card',
+    [
+      ['Experiment Name', e.name],
+      ['Problem', e.problem],
+      ['Hypothesis', e.hypothesis],
+      ['Target Customer', e.targetCustomer],
+      ['Action', e.action],
+      ['Success Metric', e.successMetric],
+      ['Baseline', e.baseline],
+      ['Target', e.target],
+      ['Duration', e.duration],
+      ['Sample Size', e.sampleSize],
+      ['Expected Cost', e.expectedCost],
+      ['Evidence', e.evidence],
+      ['Result', e.result],
+      ['Learning', e.learning],
+      ['Decision', e.decision],
+      ['Next Experiment', e.nextExperiment]
+    ]
+  );
+}
+
+function renderSnapshotEvidence(modules) {
+  const rows = (modules?.evidence || []).filter(
+    row =>
+      filled(row.customer) ||
+      filled(row.problem) ||
+      filled(row.quote) ||
+      filled(row.insight)
+  );
+
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <h3>05 · Customer Evidence</h3>
+
+      ${
+        rows.length
+          ? rows.map(row => `
+              <div class="metric">
+                <span>
+                  <b>${esc(row.customer || '-')}</b>
+                  <div class="subtle">
+                    Problem: ${esc(row.problem || '-')}
+                  </div>
+                  <div class="subtle">
+                    Alternative: ${esc(row.alternative || '-')}
+                  </div>
+                  <div class="subtle">
+                    WTP: ${esc(row.wtp || '-')}
+                  </div>
+                  <div class="subtle">
+                    Quote: ${esc(row.quote || '-')}
+                  </div>
+                  <div class="subtle">
+                    Insight: ${esc(row.insight || '-')}
+                  </div>
+                </span>
+
+                <span class="score">
+                  Pain ${num(row.pain) || 0}
+                </span>
+              </div>
+            `).join('')
+          : `<div class="empty">Belum ada evidence.</div>`
+      }
+    </div>
+  `;
+}
+
+function renderSnapshotSprint(modules, week) {
+  const row = (modules?.sprint || []).find(
+    item => Number(item.week) === Number(week)
+  ) || {};
+
+  return renderSnapshotMetricList(
+    `06 · Weekly Sprint — Week ${week}`,
+    [
+      ['Priority Problem', row.problem],
+      ['Hypothesis', row.hypothesis],
+      ['Experiment', row.experiment],
+      ['KPI', row.kpi],
+      ['Baseline', row.baseline],
+      ['Target', row.target],
+      ['Result', row.result],
+      ['Learning', row.learning],
+      ['Decision', row.decision],
+      ['Next Move', row.nextMove]
+    ]
+  );
+}
+
+function renderSnapshotFinancial(modules) {
+  const rows = modules?.financial?.months || [];
+
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <h3>07 · Financial Snapshot</h3>
+
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Month</th>
+              <th>Revenue</th>
+              <th>COGS</th>
+              <th>OPEX</th>
+              <th>Net Profit</th>
+              <th>Net Cash Flow</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            ${rows.map(row => {
+              const net =
+                num(row.revenue) -
+                num(row.cogs) -
+                num(row.opex);
+
+              const cashFlow =
+                num(row.cashIn) -
+                num(row.cashOut);
+
+              return `
+                <tr>
+                  <td><b>${esc(row.month || '-')}</b></td>
+                  <td>${money(row.revenue)}</td>
+                  <td>${money(row.cogs)}</td>
+                  <td>${money(row.opex)}</td>
+                  <td>${money(net)}</td>
+                  <td>${money(cashFlow)}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderSnapshotPortfolio(modules, week) {
+  const row = (modules?.portfolio || []).find(
+    item => Number(item.week) === Number(week)
+  ) || {};
+
+  return renderSnapshotMetricList(
+    `08 · Venture Portfolio — Week ${week}`,
+    [
+      ['What Changed?', row.changed],
+      ['Data / Evidence', row.evidence],
+      ['Decision', row.decision],
+      ['Learning', row.learned],
+      ['Next Action', row.next]
+    ]
+  );
+}
+
+async function reviewWholeWeek(studentId, week) {
   if (runtime.role !== 'lecturer') {
     toast('Hanya dosen yang dapat melakukan review.');
     return;
@@ -3163,24 +3489,44 @@ async function markWeekReviewed(studentId, week) {
     return;
   }
 
-  const existing = (student.submissions || []).find(
-    row => Number(row.week) === Number(week)
-  );
+  const submission = weeklySubmissionForStudent(student, week);
 
-  if (!existing) {
+  if (!submission) {
     toast(`Week ${week} belum disubmit mahasiswa.`);
     return;
   }
 
-  if (existing.status === 'reviewed') {
+  if (submission.status === 'reviewed') {
     toast(`Week ${week} sudah Reviewed.`);
     return;
   }
 
+  const input = document.getElementById(
+    `overall-review-${studentId}-${week}`
+  );
+
+  const message = String(input?.value || '').trim();
+  const now = nowISO();
+
   if (runtime.mode === 'demo') {
-    existing.status = 'reviewed';
-    existing.reviewed_at = nowISO();
-    existing.updated_at = nowISO();
+    if (message) {
+      const feedbackRow = {
+        id: `demo-feedback-${Date.now()}`,
+        venture_id: student.venture.id,
+        lecturer_id: runtime.profile.id,
+        module_name: null,
+        week: Number(week),
+        message,
+        created_at: now
+      };
+
+      student.feedback ??= [];
+      student.feedback.unshift(feedbackRow);
+    }
+
+    submission.status = 'reviewed';
+    submission.reviewed_at = now;
+    submission.updated_at = now;
 
     const demo = loadDemo();
     const index = demo.students.findIndex(
@@ -3189,15 +3535,38 @@ async function markWeekReviewed(studentId, week) {
 
     if (index >= 0) {
       demo.students[index].submissions = student.submissions;
+      demo.students[index].feedback = student.feedback;
       saveDemo(demo);
     }
 
     renderApp();
-    toast(`Week ${week} ditandai Reviewed`);
+    toast(`Week ${week} selesai direview secara keseluruhan`);
     return;
   }
 
-  const now = nowISO();
+  let feedbackRow = null;
+
+  if (message) {
+    const feedbackResult = await sb
+      .from('lecturer_feedback')
+      .insert({
+        venture_id: student.venture.id,
+        lecturer_id: runtime.profile.id,
+        module_name: null,
+        week: Number(week),
+        message
+      })
+      .select()
+      .single();
+
+    if (feedbackResult.error) {
+      console.error('[overall review feedback]', feedbackResult.error);
+      toast(`Gagal menyimpan feedback: ${feedbackResult.error.message}`);
+      return;
+    }
+
+    feedbackRow = feedbackResult.data;
+  }
 
   const { data, error } = await sb
     .from('weekly_submissions')
@@ -3212,8 +3581,8 @@ async function markWeekReviewed(studentId, week) {
     .single();
 
   if (error) {
-    console.error('[mark reviewed]', error);
-    toast(`Gagal review: ${error.message}`);
+    console.error('[overall review status]', error);
+    toast(`Feedback tersimpan, tetapi status review gagal: ${error.message}`);
     return;
   }
 
@@ -3225,125 +3594,137 @@ async function markWeekReviewed(studentId, week) {
     student.submissions[index] = data;
   }
 
+  if (feedbackRow) {
+    student.feedback ??= [];
+    student.feedback.unshift(feedbackRow);
+  }
+
   renderApp();
-  toast(`Week ${week} ditandai Reviewed`);
+  toast(`Week ${week} selesai direview secara keseluruhan`);
 }
 
-function lecturerWeekDetail(student, row) {
-  const submission = (student.submissions || []).find(
-    item => Number(item.week) === Number(row.week)
-  );
+function renderWeeklySnapshotReview(student, week) {
+  const submission = weeklySubmissionForStudent(student, week);
 
-  const feedback = (student.feedback || [])
-    .filter(item => Number(item.week) === Number(row.week))
-    .sort(
-      (a, b) =>
-        new Date(b.created_at || 0) -
-        new Date(a.created_at || 0)
-    );
+  if (!submission) {
+    return `
+      <div class="card">
+        <div class="empty">
+          Submission Week ${week} tidak ditemukan.
+        </div>
+      </div>
+    `;
+  }
 
-  const fields = [
-    ['Priority Problem', row.problem],
-    ['Hypothesis', row.hypothesis],
-    ['Experiment', row.experiment],
-    ['KPI', row.kpi],
-    ['Baseline', row.baseline],
-    ['Target', row.target],
-    ['Result', row.result],
-    ['Learning', row.learning],
-    ['Decision', row.decision],
-    ['Next Move', row.nextMove]
-  ];
+  const modules = weeklySnapshotModules(student, week);
+  const feedback = weeklyFeedbackForStudent(student, week);
 
-  const status = submission?.status || 'draft';
+  const ventureSnapshot = submission?.snapshot?.venture || student.venture || {};
 
   return `
     <div class="card" style="margin-bottom:12px">
       <div class="section-head">
         <div>
-          <h3>Week ${row.week}</h3>
+          <h3>Review Keseluruhan · Week ${week}</h3>
           <p>
-            ${
-              submission?.submitted_at
-                ? `Submitted ${prettyDate(submission.submitted_at)}`
-                : 'Belum disubmit'
-            }
+            Snapshot dikirim ${prettyDate(submission.submitted_at)}.
+            Data di bawah adalah kondisi seluruh toolkit saat mahasiswa
+            menekan Submit Week ${week}.
           </p>
         </div>
 
-        <span class="status ${submissionStatusClass(status)}">
-          ${submissionStatusLabel(status)}
+        <span class="status ${submissionStatusClass(submission.status)}">
+          ${submissionStatusLabel(submission.status)}
         </span>
       </div>
 
-      <div class="form-grid">
-        ${fields.map(([label, value]) => `
-          <div class="field ${
-            ['Hypothesis', 'Learning', 'Next Move'].includes(label)
-              ? 'full'
-              : ''
-          }">
-            <label>${label}</label>
-            <div class="note">
-              ${esc(value || '-')}
-            </div>
-          </div>
-        `).join('')}
+      <div class="grid equal">
+        <div class="metric">
+          <span>Venture</span>
+          <strong>${esc(ventureSnapshot.venture_name || student.venture?.venture_name || '-')}</strong>
+        </div>
+        <div class="metric">
+          <span>Category</span>
+          <strong>${esc(ventureSnapshot.category || student.venture?.category || '-')}</strong>
+        </div>
       </div>
 
-      <div style="margin-top:14px">
-        <h4 style="margin:0 0 8px">Feedback Dosen</h4>
+      ${
+        !submission.snapshot?.modules
+          ? `
+            <div class="note" style="margin-top:10px">
+              Snapshot lama tidak tersedia penuh; tampilan menggunakan
+              data live sebagai fallback.
+            </div>
+          `
+          : ''
+      }
+    </div>
 
-        ${
-          feedback.length
-            ? feedback.map(item => `
+    ${renderSnapshotHealth(modules)}
+    ${renderSnapshotKPI(modules)}
+    ${renderSnapshotProblem(modules)}
+    ${renderSnapshotExperiment(modules)}
+    ${renderSnapshotEvidence(modules)}
+    ${renderSnapshotSprint(modules, week)}
+    ${renderSnapshotFinancial(modules)}
+    ${renderSnapshotPortfolio(modules, week)}
+
+    <div class="card">
+      <div class="section-head">
+        <div>
+          <h3>Review Keseluruhan Week ${week}</h3>
+          <p>
+            Satu review berlaku untuk seluruh snapshot minggu ini.
+          </p>
+        </div>
+      </div>
+
+      ${
+        feedback.length
+          ? `
+            <div style="margin-bottom:12px">
+              ${feedback.map(item => `
                 <div class="note" style="margin-bottom:8px">
                   ${esc(item.message)}
                   <div class="subtle" style="margin-top:4px">
                     ${prettyDate(item.created_at)}
                   </div>
                 </div>
-              `).join('')
-            : `<div class="subtle" style="margin-bottom:8px">
-                 Belum ada feedback.
-               </div>`
-        }
+              `).join('')}
+            </div>
+          `
+          : ''
+      }
 
-        <textarea
-          id="feedback-${student.id}-${row.week}"
-          placeholder="Tulis feedback untuk Week ${row.week}..."></textarea>
+      ${
+        submission.status === 'reviewed'
+          ? `
+            <div class="note">
+              Submission Week ${week} sudah selesai direview
+              dan snapshot mahasiswa telah dikunci.
+            </div>
+          `
+          : `
+            <div class="field">
+              <label>Catatan / Feedback Keseluruhan (opsional)</label>
+              <textarea
+                id="overall-review-${student.id}-${week}"
+                placeholder="Tuliskan evaluasi keseluruhan untuk Week ${week}..."></textarea>
+            </div>
 
-        <div style="
-          display:flex;
-          gap:8px;
-          flex-wrap:wrap;
-          margin-top:8px;
-        ">
-          <button
-            class="btn small"
-            onclick="saveLecturerFeedback('${student.id}',${row.week})">
-            Simpan Feedback
-          </button>
-
-          <button
-            class="btn small primary"
-            onclick="markWeekReviewed('${student.id}',${row.week})"
-            ${
-              !submission || submission.status === 'reviewed'
-                ? 'disabled'
-                : ''
-            }>
-            ${
-              submission?.status === 'reviewed'
-                ? 'Sudah Reviewed'
-                : 'Mark as Reviewed'
-            }
-          </button>
-        </div>
-      </div>
+            <button
+              class="btn primary"
+              style="margin-top:10px"
+              onclick="reviewWholeWeek('${student.id}',${week})">
+              Review Keseluruhan Week ${week}
+            </button>
+          `
+      }
     </div>
   `;
 }
+
 
 /* ============================================================
    STUDENT DETAIL
@@ -3353,12 +3734,14 @@ function openStudent(id) {
   runtime.selectedStudent = runtime.classData.find(
     x => x.id === id
   );
+  runtime.selectedReviewWeek = null;
   runtime.selectedStudentTab = 'overview';
   renderApp();
 }
 
 function closeStudent() {
   runtime.selectedStudent = null;
+  runtime.selectedReviewWeek = null;
   renderApp();
 }
 
@@ -3373,12 +3756,18 @@ function renderStudentDrawer() {
   if (!student) return '';
 
   const tabs = [
+    ...(runtime.selectedReviewWeek
+      ? [[
+          'weeklySnapshot',
+          `Review W${runtime.selectedReviewWeek}`
+        ]]
+      : []),
     ['overview', 'Overview'],
     ['health', 'Health'],
     ['kpi', 'KPI'],
     ['problem', 'Problem Tree'],
     ['evidence', 'Evidence'],
-    ['sprint', 'Sprint & Review'],
+    ['sprint', 'Sprint'],
     ['financial', 'Financial'],
     ['experiment', 'Experiment'],
     ['portfolio', 'Portfolio']
@@ -3416,7 +3805,15 @@ function renderStudentDrawer() {
           `).join('')}
         </div>
 
-        ${renderStudentTab(student, student.modules)}
+        ${
+          runtime.selectedStudentTab === 'weeklySnapshot' &&
+          runtime.selectedReviewWeek
+            ? renderWeeklySnapshotReview(
+                student,
+                runtime.selectedReviewWeek
+              )
+            : renderStudentTab(student, student.modules)
+        }
       </div>
     </div>
   `;
@@ -3565,16 +3962,33 @@ function renderStudentTab(student, modules) {
       );
 
       return `
-        <div>
+        <div class="card">
+          <h3>Weekly Sprint — Live Data</h3>
+          <p class="hint">
+            Ini adalah data mahasiswa saat ini. Untuk review resmi,
+            gunakan snapshot mingguan dari menu Progress Mingguan.
+          </p>
+
           ${
             filledWeeks.length
-              ? filledWeeks
-                  .map(row => lecturerWeekDetail(student, row))
-                  .join('')
-              : `<div class="card">
-                   <div class="empty">
-                     Belum ada Weekly Sprint yang terisi.
-                   </div>
+              ? filledWeeks.map(row => `
+                  <div class="metric">
+                    <span>
+                      <b>Week ${row.week}</b>
+                      <div class="subtle">
+                        ${esc(row.problem || row.experiment || '-')}
+                      </div>
+                      <div class="subtle">
+                        Learning: ${esc(row.learning || '-')}
+                      </div>
+                    </span>
+                    <span class="status ${row.decision ? 'good' : 'neutral'}">
+                      ${esc(row.decision || 'Draft')}
+                    </span>
+                  </div>
+                `).join('')
+              : `<div class="empty">
+                   Belum ada Weekly Sprint yang terisi.
                  </div>`
           }
         </div>
