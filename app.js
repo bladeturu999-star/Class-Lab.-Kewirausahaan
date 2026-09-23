@@ -2,7 +2,7 @@ const APP = document.getElementById('app');
 const TOAST = document.getElementById('toast');
 const CONFIG = window.APP_CONFIG || {};
 const DEMO_KEY = 'venture-dashboard-v3-demo-class';
-const APP_VERSION = '3.1';
+const APP_VERSION = '3.2';
 
 const REAL_READY = Boolean(
   CONFIG.supabaseUrl &&
@@ -3061,6 +3061,290 @@ function attentionList() {
   `).join('');
 }
 
+
+/* ============================================================
+   LECTURER REVIEW ACTIONS
+   ============================================================ */
+
+function lecturerStudentById(studentId) {
+  return (runtime.classData || []).find(
+    student => student.id === studentId
+  ) || null;
+}
+
+async function saveLecturerFeedback(studentId, week) {
+  if (runtime.role !== 'lecturer') {
+    toast('Hanya dosen yang dapat memberi feedback.');
+    return;
+  }
+
+  const student = lecturerStudentById(studentId);
+
+  if (!student?.venture?.id) {
+    toast('Venture mahasiswa belum tersedia.');
+    return;
+  }
+
+  const input = document.getElementById(
+    `feedback-${studentId}-${week}`
+  );
+
+  const message = String(input?.value || '').trim();
+
+  if (!message) {
+    toast('Tulis feedback terlebih dahulu.');
+    return;
+  }
+
+  if (runtime.mode === 'demo') {
+    const row = {
+      id: `demo-feedback-${Date.now()}`,
+      venture_id: student.venture.id,
+      lecturer_id: runtime.profile.id,
+      module_name: 'sprint',
+      week: Number(week),
+      message,
+      created_at: nowISO()
+    };
+
+    student.feedback ??= [];
+    student.feedback.unshift(row);
+
+    const demo = loadDemo();
+    const index = demo.students.findIndex(
+      item => item.id === studentId
+    );
+
+    if (index >= 0) {
+      demo.students[index].feedback = student.feedback;
+      saveDemo(demo);
+    }
+
+    renderApp();
+    toast(`Feedback Week ${week} tersimpan`);
+    return;
+  }
+
+  const { data, error } = await sb
+    .from('lecturer_feedback')
+    .insert({
+      venture_id: student.venture.id,
+      lecturer_id: runtime.profile.id,
+      module_name: 'sprint',
+      week: Number(week),
+      message
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error('[lecturer feedback]', error);
+    toast(`Gagal menyimpan feedback: ${error.message}`);
+    return;
+  }
+
+  student.feedback ??= [];
+  student.feedback.unshift(data);
+
+  renderApp();
+  toast(`Feedback Week ${week} tersimpan`);
+}
+
+async function markWeekReviewed(studentId, week) {
+  if (runtime.role !== 'lecturer') {
+    toast('Hanya dosen yang dapat melakukan review.');
+    return;
+  }
+
+  const student = lecturerStudentById(studentId);
+
+  if (!student?.venture?.id) {
+    toast('Venture mahasiswa belum tersedia.');
+    return;
+  }
+
+  const existing = (student.submissions || []).find(
+    row => Number(row.week) === Number(week)
+  );
+
+  if (!existing) {
+    toast(`Week ${week} belum disubmit mahasiswa.`);
+    return;
+  }
+
+  if (existing.status === 'reviewed') {
+    toast(`Week ${week} sudah Reviewed.`);
+    return;
+  }
+
+  if (runtime.mode === 'demo') {
+    existing.status = 'reviewed';
+    existing.reviewed_at = nowISO();
+    existing.updated_at = nowISO();
+
+    const demo = loadDemo();
+    const index = demo.students.findIndex(
+      item => item.id === studentId
+    );
+
+    if (index >= 0) {
+      demo.students[index].submissions = student.submissions;
+      saveDemo(demo);
+    }
+
+    renderApp();
+    toast(`Week ${week} ditandai Reviewed`);
+    return;
+  }
+
+  const now = nowISO();
+
+  const { data, error } = await sb
+    .from('weekly_submissions')
+    .update({
+      status: 'reviewed',
+      reviewed_at: now,
+      updated_at: now
+    })
+    .eq('venture_id', student.venture.id)
+    .eq('week', Number(week))
+    .select()
+    .single();
+
+  if (error) {
+    console.error('[mark reviewed]', error);
+    toast(`Gagal review: ${error.message}`);
+    return;
+  }
+
+  const index = student.submissions.findIndex(
+    row => Number(row.week) === Number(week)
+  );
+
+  if (index >= 0) {
+    student.submissions[index] = data;
+  }
+
+  renderApp();
+  toast(`Week ${week} ditandai Reviewed`);
+}
+
+function lecturerWeekDetail(student, row) {
+  const submission = (student.submissions || []).find(
+    item => Number(item.week) === Number(row.week)
+  );
+
+  const feedback = (student.feedback || [])
+    .filter(item => Number(item.week) === Number(row.week))
+    .sort(
+      (a, b) =>
+        new Date(b.created_at || 0) -
+        new Date(a.created_at || 0)
+    );
+
+  const fields = [
+    ['Priority Problem', row.problem],
+    ['Hypothesis', row.hypothesis],
+    ['Experiment', row.experiment],
+    ['KPI', row.kpi],
+    ['Baseline', row.baseline],
+    ['Target', row.target],
+    ['Result', row.result],
+    ['Learning', row.learning],
+    ['Decision', row.decision],
+    ['Next Move', row.nextMove]
+  ];
+
+  const status = submission?.status || 'draft';
+
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <div class="section-head">
+        <div>
+          <h3>Week ${row.week}</h3>
+          <p>
+            ${
+              submission?.submitted_at
+                ? `Submitted ${prettyDate(submission.submitted_at)}`
+                : 'Belum disubmit'
+            }
+          </p>
+        </div>
+
+        <span class="status ${submissionStatusClass(status)}">
+          ${submissionStatusLabel(status)}
+        </span>
+      </div>
+
+      <div class="form-grid">
+        ${fields.map(([label, value]) => `
+          <div class="field ${
+            ['Hypothesis', 'Learning', 'Next Move'].includes(label)
+              ? 'full'
+              : ''
+          }">
+            <label>${label}</label>
+            <div class="note">
+              ${esc(value || '-')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div style="margin-top:14px">
+        <h4 style="margin:0 0 8px">Feedback Dosen</h4>
+
+        ${
+          feedback.length
+            ? feedback.map(item => `
+                <div class="note" style="margin-bottom:8px">
+                  ${esc(item.message)}
+                  <div class="subtle" style="margin-top:4px">
+                    ${prettyDate(item.created_at)}
+                  </div>
+                </div>
+              `).join('')
+            : `<div class="subtle" style="margin-bottom:8px">
+                 Belum ada feedback.
+               </div>`
+        }
+
+        <textarea
+          id="feedback-${student.id}-${row.week}"
+          placeholder="Tulis feedback untuk Week ${row.week}..."></textarea>
+
+        <div style="
+          display:flex;
+          gap:8px;
+          flex-wrap:wrap;
+          margin-top:8px;
+        ">
+          <button
+            class="btn small"
+            onclick="saveLecturerFeedback('${student.id}',${row.week})">
+            Simpan Feedback
+          </button>
+
+          <button
+            class="btn small primary"
+            onclick="markWeekReviewed('${student.id}',${row.week})"
+            ${
+              !submission || submission.status === 'reviewed'
+                ? 'disabled'
+                : ''
+            }>
+            ${
+              submission?.status === 'reviewed'
+                ? 'Sudah Reviewed'
+                : 'Mark as Reviewed'
+            }
+          </button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 /* ============================================================
    STUDENT DETAIL
    ============================================================ */
@@ -3091,8 +3375,10 @@ function renderStudentDrawer() {
   const tabs = [
     ['overview', 'Overview'],
     ['health', 'Health'],
+    ['kpi', 'KPI'],
+    ['problem', 'Problem Tree'],
     ['evidence', 'Evidence'],
-    ['sprint', 'Sprint'],
+    ['sprint', 'Sprint & Review'],
     ['financial', 'Financial'],
     ['experiment', 'Experiment'],
     ['portfolio', 'Portfolio']
@@ -3146,8 +3432,12 @@ function renderStudentTab(student, modules) {
             <div class="metric">
               <span>
                 <b>${esc(x.area)}</b>
+                <div class="subtle">${esc(x.question || '')}</div>
                 <div class="subtle">
-                  ${esc(x.evidence || 'Belum ada evidence')}
+                  Evidence: ${esc(x.evidence || 'Belum ada')}
+                </div>
+                <div class="subtle">
+                  Action: ${esc(x.action || '-')}
                 </div>
               </span>
               <span class="score">${x.score}/5</span>
@@ -3156,19 +3446,103 @@ function renderStudentTab(student, modules) {
         </div>
       `;
 
+    case 'kpi':
+      return `
+        <div class="card">
+          <h3>Baseline KPI</h3>
+          <div class="table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>KPI</th>
+                  <th>Baseline</th>
+                  <th>Target</th>
+                  <th>Unit</th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${modules.kpi.map(row => `
+                  <tr>
+                    <td>
+                      <b>${esc(row.kpi)}</b>
+                      <div class="subtle">${esc(row.category)}</div>
+                    </td>
+                    <td>${esc(row.baseline || '-')}</td>
+                    <td>${esc(row.target || '-')}</td>
+                    <td>${esc(row.unit || '-')}</td>
+                    <td>${esc(row.source || '-')}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+
+    case 'problem': {
+      const p = modules.problem || {};
+      const items = [
+        ['Core Problem', p.coreProblem],
+        ['Symptom', p.symptom],
+        ['WHY #1', p.why1],
+        ['WHY #2', p.why2],
+        ['WHY #3', p.why3],
+        ['Root Cause', p.rootCause],
+        ['Consequence', p.consequence],
+        ['Priority Problem', p.priorityProblem],
+        ['Next Sprint Hypothesis', p.hypothesis],
+        ['KPI', p.kpi],
+        ['Deadline', p.deadline]
+      ];
+
+      return `
+        <div class="card">
+          <h3>Problem Tree</h3>
+          ${items.map(([label, value]) => `
+            <div class="metric">
+              <span>${label}</span>
+              <strong style="
+                max-width:68%;
+                text-align:right;
+                white-space:normal;
+              ">
+                ${esc(value || '-')}
+              </strong>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
     case 'evidence':
       return `
         <div class="card">
           <h3>Customer Evidence</h3>
           ${
             modules.evidence.filter(
-              x => filled(x.customer) || filled(x.problem)
+              x =>
+                filled(x.customer) ||
+                filled(x.problem) ||
+                filled(x.quote)
             ).map(x => `
               <div class="metric">
                 <span>
                   <b>${esc(x.customer || '-')}</b>
                   <div class="subtle">
-                    ${esc(x.problem || '')}
+                    Problem: ${esc(x.problem || '-')}
+                  </div>
+                  <div class="subtle">
+                    Alternative: ${esc(x.alternative || '-')}
+                  </div>
+                  <div class="subtle">
+                    WTP: ${esc(x.wtp || '-')}
+                  </div>
+                  <div class="subtle">
+                    Quote: ${esc(x.quote || '-')}
+                  </div>
+                  <div class="subtle">
+                    Insight: ${esc(x.insight || '-')}
                   </div>
                 </span>
                 <span class="score">
@@ -3181,72 +3555,57 @@ function renderStudentTab(student, modules) {
         </div>
       `;
 
-    case 'sprint':
+    case 'sprint': {
+      const filledWeeks = modules.sprint.filter(
+        row =>
+          Object.entries(row).some(
+            ([key, value]) =>
+              key !== 'week' && filled(value)
+          )
+      );
+
       return `
-        <div class="card">
-          <h3>Weekly Sprint</h3>
-
+        <div>
           ${
-            modules.sprint.filter(
-              x =>
-                Object.entries(x).some(
-                  ([k, v]) =>
-                    k !== 'week' && filled(v)
-                )
-            ).map(x => {
-              const submission = (student.submissions || []).find(
-                s => Number(s.week) === Number(x.week)
-              );
-
-              return `
-                <div class="metric">
-                  <span>
-                    <b>Week ${x.week}</b>
-                    <div class="subtle">
-                      ${esc(x.experiment || x.problem || '')}
-                    </div>
-                  </span>
-
-                  <span class="status ${
-                    submission
-                      ? submissionStatusClass(submission.status)
-                      : x.decision
-                        ? 'good'
-                        : 'neutral'
-                  }">
-                    ${
-                      submission
-                        ? submissionStatusLabel(submission.status)
-                        : esc(x.decision || 'Draft')
-                    }
-                  </span>
-                </div>
-              `;
-            }).join('') ||
-            `<div class="empty">Belum ada sprint.</div>`
+            filledWeeks.length
+              ? filledWeeks
+                  .map(row => lecturerWeekDetail(student, row))
+                  .join('')
+              : `<div class="card">
+                   <div class="empty">
+                     Belum ada Weekly Sprint yang terisi.
+                   </div>
+                 </div>`
           }
         </div>
       `;
+    }
 
     case 'financial':
       return `
         <div class="card">
           <h3>Financial Snapshot</h3>
-          ${modules.financial.months.map(x => `
-            <div class="metric">
-              <span>${x.month}</span>
-              <span>
-                <b>${money(x.revenue)}</b>
-                <div class="subtle">
-                  Net ${money(
-                    num(x.revenue) -
-                    num(x.cogs) -
-                    num(x.opex)
-                  )}
-                </div>
-              </span>
-            </div>
-          `).join('')}
+          ${modules.financial.months.map(x => {
+            const gross = num(x.revenue) - num(x.cogs);
+            const net = gross - num(x.opex);
+
+            return `
+              <div class="metric">
+                <span>
+                  <b>${esc(x.month)}</b>
+                  <div class="subtle">
+                    Revenue ${money(x.revenue)}
+                    · COGS ${money(x.cogs)}
+                    · OPEX ${money(x.opex)}
+                  </div>
+                </span>
+                <span>
+                  <b>${money(net)}</b>
+                  <div class="subtle">Net Profit</div>
+                </span>
+              </div>
+            `;
+          }).join('')}
         </div>
       `;
 
@@ -3258,20 +3617,28 @@ function renderStudentTab(student, modules) {
           </h3>
 
           ${[
-            'problem',
-            'hypothesis',
-            'targetCustomer',
-            'action',
-            'successMetric',
-            'result',
-            'learning',
-            'decision'
-          ].map(key => `
+            ['Problem', 'problem'],
+            ['Hypothesis', 'hypothesis'],
+            ['Target Customer', 'targetCustomer'],
+            ['Action', 'action'],
+            ['Success Metric', 'successMetric'],
+            ['Baseline', 'baseline'],
+            ['Target', 'target'],
+            ['Duration', 'duration'],
+            ['Sample Size', 'sampleSize'],
+            ['Expected Cost', 'expectedCost'],
+            ['Evidence', 'evidence'],
+            ['Result', 'result'],
+            ['Learning', 'learning'],
+            ['Decision', 'decision'],
+            ['Next Experiment', 'nextExperiment']
+          ].map(([label, key]) => `
             <div class="metric">
-              <span>${key}</span>
+              <span>${label}</span>
               <strong style="
                 max-width:65%;
                 text-align:right;
+                white-space:normal;
               ">
                 ${esc(modules.experiment[key] || '-')}
               </strong>
@@ -3292,10 +3659,19 @@ function renderStudentTab(student, modules) {
                 <span>
                   <b>Week ${x.week}</b>
                   <div class="subtle">
-                    ${esc(x.changed)}
+                    Changed: ${esc(x.changed || '-')}
+                  </div>
+                  <div class="subtle">
+                    Evidence: ${esc(x.evidence || '-')}
+                  </div>
+                  <div class="subtle">
+                    Learning: ${esc(x.learned || '-')}
+                  </div>
+                  <div class="subtle">
+                    Next: ${esc(x.next || '-')}
                   </div>
                 </span>
-                <span>${esc(x.decision || '')}</span>
+                <span>${esc(x.decision || '-')}</span>
               </div>
             `).join('') ||
             `<div class="empty">Belum ada portfolio.</div>`
@@ -3328,10 +3704,11 @@ function renderStudentTab(student, modules) {
           </div>
 
           <div class="card kpi-card">
-            <div class="label">Revenue 6M</div>
-            <div class="value"
-                 style="font-size:18px">
-              ${money(revenueTotal(modules))}
+            <div class="label">Pending Review</div>
+            <div class="value">
+              ${(student.submissions || []).filter(
+                row => row.status === 'submitted'
+              ).length}
             </div>
           </div>
         </div>
@@ -3347,6 +3724,11 @@ function renderStudentTab(student, modules) {
           <div class="metric">
             <span>NIM</span>
             <strong>${esc(student.profile.nim || '-')}</strong>
+          </div>
+
+          <div class="metric">
+            <span>Venture</span>
+            <strong>${esc(student.venture?.venture_name || '-')}</strong>
           </div>
 
           <div class="metric">
