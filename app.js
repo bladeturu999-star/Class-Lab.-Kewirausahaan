@@ -2,7 +2,7 @@ const APP = document.getElementById('app');
 const TOAST = document.getElementById('toast');
 const CONFIG = window.APP_CONFIG || {};
 const DEMO_KEY = 'venture-dashboard-v3-demo-class';
-const APP_VERSION = '3.3';
+const APP_VERSION = '3.4';
 
 const REAL_READY = Boolean(
   CONFIG.supabaseUrl &&
@@ -61,7 +61,9 @@ let runtime = {
   authTab: 'login',
   demoStudentId: null,
   submissions: [],
-  feedback: []
+  feedback: [],
+  activeWeek: 1,
+  weeklyData: {}
 };
 
 function toast(msg) {
@@ -362,6 +364,7 @@ function createDemoClass() {
         description: 'Venture mahasiswa Lab. Kewirausahaan II'
       },
       modules,
+      weeklyData: { 1: modules },
       submissions: Array.from({ length: completed }, (_, w) => ({
         venture_id: `demo-venture-${i}`,
         week: w + 1,
@@ -747,6 +750,8 @@ async function realLogout() {
     classData: [],
     submissions: [],
     feedback: [],
+    activeWeek: 1,
+    weeklyData: {},
     activePage: 'overview',
     selectedStudent: null,
     selectedReviewWeek: null
@@ -754,6 +759,7 @@ async function realLogout() {
 
   renderAuth();
 }
+
 
 async function loadRealUser(user) {
   const { data: profile, error: profileError } = await sb
@@ -796,6 +802,7 @@ async function loadRealUser(user) {
   if (!venture) {
     runtime.venture = null;
     runtime.modules = null;
+    runtime.weeklyData = {};
     runtime.submissions = [];
     renderOnboarding();
     return;
@@ -803,28 +810,12 @@ async function loadRealUser(user) {
 
   runtime.venture = venture;
 
-  const { data: rows, error: moduleError } = await sb
-    .from('module_data')
-    .select('module_name,payload,updated_at')
-    .eq('venture_id', venture.id);
-
-  if (moduleError) {
-    toast(moduleError.message);
-    return;
-  }
-
-  const mods = defaultModules(0);
-
-  (rows || []).forEach(row => {
-    if (MODULES.includes(row.module_name)) {
-      mods[row.module_name] = row.payload;
-    }
-  });
-
-  runtime.modules = mods;
-
   await loadStudentSubmissions();
   await loadStudentFeedback();
+  await loadStudentWeeklyData();
+
+  runtime.activeWeek = chooseInitialStudentWeek();
+  runtime.modules = ensureWeekData(runtime.activeWeek);
 
   renderApp();
 }
@@ -881,6 +872,7 @@ async function loadStudentFeedback() {
   runtime.feedback = data || [];
 }
 
+
 async function loadRealClass() {
   const { data: profiles, error: profileError } = await sb
     .from('profiles')
@@ -910,19 +902,19 @@ async function loadRealClass() {
     .map(v => v.id)
     .filter(Boolean);
 
-  let moduleRows = [];
+  let weeklyRows = [];
   let submissionRows = [];
   let feedbackRows = [];
 
   if (ventureIds.length) {
     const [
-      modulesRes,
+      weeklyRes,
       submissionsRes,
       feedbackRes
     ] = await Promise.all([
       sb
-        .from('module_data')
-        .select('venture_id,module_name,payload,updated_at')
+        .from('weekly_module_data')
+        .select('venture_id,week,module_name,payload,updated_at')
         .in('venture_id', ventureIds),
 
       sb
@@ -936,28 +928,29 @@ async function loadRealClass() {
         .in('venture_id', ventureIds)
     ]);
 
-    moduleRows = modulesRes.data || [];
+    weeklyRows = weeklyRes.data || [];
     submissionRows = submissionsRes.data || [];
     feedbackRows = feedbackRes.data || [];
   }
 
-  const grouped = {};
+  const weeklyByVenture = {};
+  const updatedByVenture = {};
   const submissionsByVenture = {};
   const feedbackByVenture = {};
 
-  moduleRows.forEach(row => {
-    grouped[row.venture_id] ??= {
-      modules: defaultModules(0),
-      updatedAt: null
-    };
+  weeklyRows.forEach(row => {
+    weeklyByVenture[row.venture_id] ??= {};
+    weeklyByVenture[row.venture_id][row.week] ??= defaultModules(0);
 
-    grouped[row.venture_id].modules[row.module_name] = row.payload;
+    if (MODULES.includes(row.module_name)) {
+      weeklyByVenture[row.venture_id][row.week][row.module_name] = row.payload;
+    }
 
     if (
-      !grouped[row.venture_id].updatedAt ||
-      new Date(row.updated_at) > new Date(grouped[row.venture_id].updatedAt)
+      !updatedByVenture[row.venture_id] ||
+      new Date(row.updated_at) > new Date(updatedByVenture[row.venture_id])
     ) {
-      grouped[row.venture_id].updatedAt = row.updated_at;
+      updatedByVenture[row.venture_id] = row.updated_at;
     }
   });
 
@@ -971,7 +964,18 @@ async function loadRealClass() {
 
   runtime.classData = (profiles || []).map(profile => {
     const venture = ventureMap.get(profile.id);
-    const group = venture ? grouped[venture.id] : null;
+
+    const weeklyData = venture
+      ? (weeklyByVenture[venture.id] || {})
+      : {};
+
+    const weekNumbers = Object.keys(weeklyData)
+      .map(Number)
+      .filter(Boolean);
+
+    const latestWeek = weekNumbers.length
+      ? Math.max(...weekNumbers)
+      : 1;
 
     return {
       id: profile.id,
@@ -982,14 +986,18 @@ async function loadRealClass() {
         venture_name: 'Belum onboarding',
         category: '-'
       },
-      modules: group?.modules || defaultModules(0),
+      weeklyData,
+      latestWeek,
+      modules: weeklyData[latestWeek] || defaultModules(0),
       submissions: venture
         ? (submissionsByVenture[venture.id] || [])
         : [],
       feedback: venture
         ? (feedbackByVenture[venture.id] || [])
         : [],
-      updatedAt: group?.updatedAt || null
+      updatedAt: venture
+        ? (updatedByVenture[venture.id] || null)
+        : null
     };
   });
 }
@@ -1060,6 +1068,7 @@ function renderOnboarding() {
   `;
 }
 
+
 async function createRealVenture(event) {
   event.preventDefault();
 
@@ -1082,7 +1091,11 @@ async function createRealVenture(event) {
   }
 
   runtime.venture = data;
-  runtime.modules = defaultModules(0);
+  runtime.activeWeek = 1;
+  runtime.weeklyData = {
+    1: defaultModules(0)
+  };
+  runtime.modules = runtime.weeklyData[1];
   runtime.submissions = [];
   runtime.feedback = [];
 
@@ -1097,6 +1110,7 @@ async function createRealVenture(event) {
 /* ============================================================
    DEMO
    ============================================================ */
+
 
 function enterDemo(role) {
   const demo = loadDemo();
@@ -1114,6 +1128,7 @@ function enterDemo(role) {
     runtime.profile = demo.lecturer;
     runtime.venture = null;
     runtime.modules = null;
+    runtime.weeklyData = {};
     runtime.submissions = [];
     runtime.feedback = [];
   } else {
@@ -1122,9 +1137,13 @@ function enterDemo(role) {
     runtime.demoStudentId = student.id;
     runtime.profile = student.profile;
     runtime.venture = student.venture;
-    runtime.modules = student.modules;
     runtime.submissions = student.submissions || [];
     runtime.feedback = student.feedback || [];
+    runtime.weeklyData = student.weeklyData || {
+      1: student.modules
+    };
+    runtime.activeWeek = chooseInitialStudentWeek();
+    runtime.modules = ensureWeekData(runtime.activeWeek);
   }
 
   renderApp();
@@ -1147,6 +1166,7 @@ function resetDemo() {
 /* ============================================================
    APP SHELL
    ============================================================ */
+
 
 function renderApp() {
   const nav = runtime.role === 'lecturer'
@@ -1226,7 +1246,10 @@ function renderApp() {
 
     ${runtime.selectedStudent ? renderStudentDrawer() : ''}
   `;
+
+  applyWeekLock();
 }
+
 
 function topbar() {
   const studentTitles = {
@@ -1255,7 +1278,7 @@ function topbar() {
 
   const sub = runtime.role === 'lecturer'
     ? 'Pantau perkembangan seluruh venture dalam satu kelas.'
-    : `${runtime.venture?.venture_name || ''} · ${runtime.venture?.category || ''}`;
+    : `${runtime.venture?.venture_name || ''} · Week ${runtime.activeWeek} · ${runtime.venture?.category || ''}`;
 
   return `
     <div class="topbar">
@@ -1268,6 +1291,8 @@ function topbar() {
       </div>
 
       <div class="top-actions">
+        ${renderWeekSwitcher()}
+
         ${
           runtime.mode === 'demo'
             ? `
@@ -1294,9 +1319,11 @@ function topbar() {
 
         ${
           runtime.role === 'student'
-            ? `<button class="btn small"
-                       onclick="saveAllNow()">
-                 Simpan
+            ? `<button
+                 class="btn small"
+                 onclick="saveAllNow()"
+                 ${isWeekLocked() ? 'disabled' : ''}>
+                 Simpan Week ${runtime.activeWeek}
                </button>`
             : ''
         }
@@ -1377,6 +1404,7 @@ function renderStudentPage() {
   }
 }
 
+
 function renderStudentOverview() {
   const m = runtime.modules;
 
@@ -1384,35 +1412,61 @@ function renderStudentOverview() {
   const rev = revenueTotal(m);
   const profit = netProfitTotal(m);
   const ev = evidenceCount(m);
-  const week = currentWeek(m);
   const comp = completion(m);
+  const submission = activeWeekSubmission();
 
   return `
+    <div class="card" style="margin-bottom:15px">
+      <div class="section-head">
+        <div>
+          <h3>Workspace Week ${runtime.activeWeek}</h3>
+          <p>
+            Semua menu di dashboard saat ini membaca dan menyimpan
+            data khusus untuk Week ${runtime.activeWeek}.
+          </p>
+        </div>
+
+        <span class="status ${submissionStatusClass(submission?.status || 'draft')}">
+          ${submissionStatusLabel(submission?.status || 'draft')}
+        </span>
+      </div>
+
+      <div class="note">
+        ${
+          isWeekLocked()
+            ? `Week ${runtime.activeWeek} sudah direview dosen. Seluruh isian minggu ini bersifat read-only.`
+            : `Isi seluruh indikator Week ${runtime.activeWeek}, simpan otomatis, lalu Submit Semua saat siap direview.`
+        }
+      </div>
+    </div>
+
+    ${renderStudentWeekFeedback()}
+
     <div class="grid kpis">
       <div class="card kpi-card">
         <div class="label">Overall Health</div>
         <div class="value">${fmt(hs)}/5</div>
-        <div class="meta">8 area venture</div>
+        <div class="meta">Week ${runtime.activeWeek}</div>
       </div>
 
       <div class="card kpi-card">
         <div class="label">Evidence</div>
         <div class="value">${ev}</div>
-        <div class="meta">customer records</div>
+        <div class="meta">Week ${runtime.activeWeek}</div>
       </div>
 
       <div class="card kpi-card">
-        <div class="label">Current Sprint</div>
-        <div class="value">W${week || 0}</div>
+        <div class="label">Active Week</div>
+        <div class="value">W${runtime.activeWeek}</div>
         <div class="meta">dari 16 minggu</div>
       </div>
 
       <div class="card kpi-card">
-        <div class="label">Revenue 6M</div>
+        <div class="label">Revenue Snapshot</div>
         <div class="value" style="font-size:20px">
           ${money(rev)}
         </div>
-        <div class="meta">akumulasi</div>
+        <div class="meta">Week ${runtime.activeWeek}</div>
       </div>
 
       <div class="card kpi-card">
@@ -1421,13 +1475,13 @@ function renderStudentOverview() {
              style="font-size:20px">
           ${money(profit)}
         </div>
-        <div class="meta">estimated</div>
+        <div class="meta">Week ${runtime.activeWeek}</div>
       </div>
 
       <div class="card kpi-card">
         <div class="label">Completion</div>
         <div class="value">${comp}%</div>
-        <div class="meta">kelengkapan toolkit</div>
+        <div class="meta">Week ${runtime.activeWeek}</div>
       </div>
     </div>
 
@@ -1436,7 +1490,7 @@ function renderStudentOverview() {
         <div class="section-head">
           <div>
             <h3>Venture Profile</h3>
-            <p>Identitas bisnis yang terlihat oleh dosen.</p>
+            <p>Identitas utama venture.</p>
           </div>
         </div>
 
@@ -1464,26 +1518,11 @@ function renderStudentOverview() {
       </div>
 
       <div class="card">
-        <h3>Progress Toolkit</h3>
+        <h3>Progress Toolkit · Week ${runtime.activeWeek}</h3>
         <p class="hint">
-          Kelengkapan akan berubah otomatis sesuai input.
+          Setiap Week memiliki progresnya sendiri.
         </p>
         ${progressRows(m)}
-      </div>
-    </div>
-
-    <div class="card" style="margin-top:15px">
-      <h3>Fokus Minggu Ini</h3>
-      <p class="hint">
-        Gunakan Weekly Sprint sebagai pusat dokumentasi
-        problem → hypothesis → experiment → evidence →
-        learning → decision.
-      </p>
-
-      <div class="note">
-        Dosen dapat melihat update yang kamu simpan,
-        tetapi mahasiswa lain tidak memiliki akses ke venture
-        kamu pada Cloud Mode.
       </div>
     </div>
   `;
@@ -1852,6 +1891,307 @@ function feedbackFor(week) {
   );
 }
 
+function feedbackForIndicator(student, week, moduleName, fieldPath) {
+  return (student?.feedback || [])
+    .filter(row =>
+      Number(row.week) === Number(week) &&
+      (row.module_name || null) === (moduleName || null) &&
+      (row.field_path || null) === (fieldPath || null)
+    )
+    .sort(
+      (a, b) =>
+        new Date(b.updated_at || b.created_at || 0) -
+        new Date(a.updated_at || a.created_at || 0)
+    )[0] || null;
+}
+
+function feedbackLabel(row) {
+  if (!row.module_name) return 'Review keseluruhan';
+
+  const moduleLabels = {
+    health: 'Health Check',
+    kpi: 'Baseline KPI',
+    problem: 'Problem Tree',
+    experiment: 'Experiment',
+    evidence: 'Customer Evidence',
+    sprint: 'Weekly Sprint',
+    financial: 'Financial',
+    portfolio: 'Portfolio'
+  };
+
+  const path = row.field_path
+    ? ` · ${row.field_path}`
+    : '';
+
+  return `${moduleLabels[row.module_name] || row.module_name}${path}`;
+}
+
+function activeWeekSubmission() {
+  return submissionFor(runtime.activeWeek);
+}
+
+function isWeekLocked(week = runtime.activeWeek) {
+  return submissionFor(week)?.status === 'reviewed';
+}
+
+function chooseInitialStudentWeek() {
+  const dataWeeks = Object.keys(runtime.weeklyData || {})
+    .map(Number)
+    .filter(w => w >= 1 && w <= 16);
+
+  const submissions = [...(runtime.submissions || [])]
+    .sort((a, b) => Number(a.week) - Number(b.week));
+
+  const latestSubmission = submissions.at(-1);
+
+  if (
+    latestSubmission?.status === 'reviewed' &&
+    Number(latestSubmission.week) < 16
+  ) {
+    const next = Number(latestSubmission.week) + 1;
+
+    if (!dataWeeks.length || !dataWeeks.includes(next)) {
+      return next;
+    }
+  }
+
+  const all = [
+    ...dataWeeks,
+    ...submissions.map(row => Number(row.week))
+  ].filter(Boolean);
+
+  return all.length
+    ? Math.max(...all)
+    : 1;
+}
+
+function ensureWeekData(week) {
+  const w = Math.max(1, Math.min(16, Number(week) || 1));
+
+  runtime.weeklyData ??= {};
+
+  if (!runtime.weeklyData[w]) {
+    runtime.weeklyData[w] = defaultModules(0);
+  }
+
+  return runtime.weeklyData[w];
+}
+
+function setActiveWeek(week) {
+  const nextWeek = Math.max(1, Math.min(16, Number(week) || 1));
+
+  runtime.activeWeek = nextWeek;
+  runtime.modules = ensureWeekData(nextWeek);
+  runtime.selectedStudent = null;
+  runtime.selectedReviewWeek = null;
+
+  renderApp();
+}
+
+function renderWeekSwitcher() {
+  if (runtime.role !== 'student') return '';
+
+  const currentStatus = submissionFor(runtime.activeWeek)?.status || 'draft';
+
+  return `
+    <div style="
+      display:flex;
+      align-items:center;
+      gap:6px;
+      flex-wrap:wrap;
+    ">
+      <button
+        class="btn small"
+        onclick="setActiveWeek(${Math.max(1, runtime.activeWeek - 1)})"
+        ${runtime.activeWeek <= 1 ? 'disabled' : ''}>
+        ‹
+      </button>
+
+      <select
+        data-week-picker="true"
+        onchange="setActiveWeek(this.value)"
+        style="min-width:150px">
+        ${Array.from({ length: 16 }, (_, i) => {
+          const week = i + 1;
+          const status = submissionFor(week)?.status;
+          const marker =
+            status === 'reviewed'
+              ? ' · Reviewed'
+              : status === 'submitted'
+                ? ' · Submitted'
+                : runtime.weeklyData?.[week]
+                  ? ' · Draft'
+                  : '';
+
+          return `
+            <option
+              value="${week}"
+              ${runtime.activeWeek === week ? 'selected' : ''}>
+              Week ${week}${marker}
+            </option>
+          `;
+        }).join('')}
+      </select>
+
+      <button
+        class="btn small"
+        onclick="setActiveWeek(${Math.min(16, runtime.activeWeek + 1)})"
+        ${runtime.activeWeek >= 16 ? 'disabled' : ''}>
+        ›
+      </button>
+
+      <span class="status ${submissionStatusClass(currentStatus)}">
+        ${submissionStatusLabel(currentStatus)}
+      </span>
+    </div>
+  `;
+}
+
+function applyWeekLock() {
+  if (
+    runtime.role !== 'student' ||
+    !isWeekLocked(runtime.activeWeek)
+  ) {
+    return;
+  }
+
+  document
+    .querySelectorAll('#page input, #page textarea, #page select')
+    .forEach(el => {
+      el.disabled = true;
+    });
+}
+
+function weekHasMeaningfulData() {
+  const m = runtime.modules || {};
+  const week = Number(runtime.activeWeek);
+
+  if ((m.health || []).some(row =>
+    filled(row.evidence) ||
+    filled(row.action) ||
+    Boolean(row.priority) ||
+    num(row.score) !== 3
+  )) return true;
+
+  if ((m.kpi || []).some(row =>
+    filled(row.baseline) ||
+    filled(row.target) ||
+    filled(row.unit) ||
+    filled(row.source) ||
+    filled(row.notes)
+  )) return true;
+
+  if (Object.values(m.problem || {}).some(filled)) return true;
+
+  const experiment = m.experiment || {};
+  if (Object.entries(experiment).some(([key, value]) =>
+    filled(value) &&
+    !(key === 'hypothesis' && value === 'If we ___, then ___ because ___.')
+  )) return true;
+
+  if ((m.evidence || []).some(row =>
+    filled(row.customer) ||
+    filled(row.problem) ||
+    filled(row.alternative) ||
+    filled(row.wtp) ||
+    filled(row.quote) ||
+    filled(row.insight)
+  )) return true;
+
+  const sprint = (m.sprint || []).find(
+    row => Number(row.week) === week
+  );
+
+  if (sprint && Object.entries(sprint).some(
+    ([key, value]) => key !== 'week' && filled(value)
+  )) return true;
+
+  if ((m.financial?.months || []).some(row =>
+    num(row.revenue) ||
+    num(row.cogs) ||
+    num(row.opex) ||
+    num(row.cashIn) ||
+    num(row.cashOut)
+  )) return true;
+
+  const portfolio = (m.portfolio || []).find(
+    row => Number(row.week) === week
+  );
+
+  if (portfolio && Object.entries(portfolio).some(
+    ([key, value]) => key !== 'week' && filled(value)
+  )) return true;
+
+  return false;
+}
+
+function renderStudentWeekFeedback() {
+  const rows = feedbackFor(runtime.activeWeek);
+
+  if (!rows.length) {
+    return `
+      <div class="card" style="margin-bottom:15px">
+        <h3>Feedback Dosen · Week ${runtime.activeWeek}</h3>
+        <div class="empty">Belum ada feedback untuk Week ini.</div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="card" style="margin-bottom:15px">
+      <h3>Feedback Dosen · Week ${runtime.activeWeek}</h3>
+      ${rows.map(row => `
+        <div class="note" style="margin-top:8px">
+          <b>${esc(feedbackLabel(row))}</b><br>
+          ${esc(row.message)}
+          <div class="subtle" style="margin-top:4px">
+            ${prettyDate(row.updated_at || row.created_at)}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+async function loadStudentWeeklyData() {
+  if (
+    !REAL_READY ||
+    runtime.mode !== 'real' ||
+    runtime.role !== 'student' ||
+    !runtime.venture?.id
+  ) {
+    runtime.weeklyData = {};
+    return;
+  }
+
+  const { data, error } = await sb
+    .from('weekly_module_data')
+    .select('week,module_name,payload,updated_at')
+    .eq('venture_id', runtime.venture.id)
+    .order('week');
+
+  if (error) {
+    console.error('[weekly module data]', error);
+    toast(error.message);
+    runtime.weeklyData = {};
+    return;
+  }
+
+  const byWeek = {};
+
+  (data || []).forEach(row => {
+    const week = Number(row.week);
+
+    byWeek[week] ??= defaultModules(0);
+
+    if (MODULES.includes(row.module_name)) {
+      byWeek[week][row.module_name] = row.payload;
+    }
+  });
+
+  runtime.weeklyData = byWeek;
+}
+
 function submissionStatusLabel(status) {
   if (status === 'reviewed') return 'Reviewed';
   if (status === 'submitted') return 'Submitted';
@@ -1914,36 +2254,45 @@ async function saveAllModulesSilently() {
   return true;
 }
 
+
 async function submitWeek(week) {
-  if (!sprintHasData(week)) {
-    toast(`Isi Weekly Sprint Week ${week} terlebih dahulu sebagai anchor submission.`);
+  const targetWeek = Number(week);
+
+  if (targetWeek !== Number(runtime.activeWeek)) {
+    setActiveWeek(targetWeek);
+    toast(`Week ${targetWeek} dibuka. Periksa isinya lalu submit kembali.`);
     return;
   }
 
-  const existing = submissionFor(week);
+  if (!weekHasMeaningfulData()) {
+    toast(`Isi minimal satu indikator pada Week ${targetWeek} terlebih dahulu.`);
+    return;
+  }
+
+  const existing = submissionFor(targetWeek);
 
   if (existing?.status === 'reviewed') {
-    toast(`Week ${week} sudah direview dosen dan snapshot-nya dikunci.`);
+    toast(`Week ${targetWeek} sudah direview dosen dan dikunci.`);
     return;
   }
 
   if (runtime.mode === 'demo') {
     const now = nowISO();
-    const snapshot = buildWeeklySnapshot(week);
+    const snapshot = buildWeeklySnapshot(targetWeek);
 
     const row = {
       venture_id: runtime.venture.id,
-      week: Number(week),
+      week: targetWeek,
       status: 'submitted',
       submitted_at: existing?.submitted_at || now,
       reviewed_at: null,
       updated_at: now,
       snapshot,
-      snapshot_version: 1
+      snapshot_version: 2
     };
 
     const index = runtime.submissions.findIndex(
-      x => Number(x.week) === Number(week)
+      x => Number(x.week) === targetWeek
     );
 
     if (index >= 0) {
@@ -1958,6 +2307,7 @@ async function submitWeek(week) {
     );
 
     if (studentIndex >= 0) {
+      demo.students[studentIndex].weeklyData = runtime.weeklyData;
       demo.students[studentIndex].modules = runtime.modules;
       demo.students[studentIndex].submissions = runtime.submissions;
       demo.students[studentIndex].updatedAt = now;
@@ -1965,7 +2315,7 @@ async function submitWeek(week) {
     }
 
     renderApp();
-    toast(`Week ${week} berhasil disubmit sebagai snapshot seluruh toolkit`);
+    toast(`Week ${targetWeek} berhasil disubmit`);
     return;
   }
 
@@ -1987,17 +2337,17 @@ async function submitWeek(week) {
   }
 
   const now = nowISO();
-  const snapshot = buildWeeklySnapshot(week);
+  const snapshot = buildWeeklySnapshot(targetWeek);
 
   const payload = {
     venture_id: runtime.venture.id,
-    week: Number(week),
+    week: targetWeek,
     status: 'submitted',
     submitted_at: existing?.submitted_at || now,
     reviewed_at: null,
     updated_at: now,
     snapshot,
-    snapshot_version: 1
+    snapshot_version: 2
   };
 
   const { data, error } = await sb
@@ -2009,13 +2359,13 @@ async function submitWeek(week) {
     .single();
 
   if (error) {
-    console.error('[v3.3] submit snapshot error:', error);
+    console.error('[v3.4] submit snapshot error:', error);
     toast(`Gagal submit: ${error.message}`);
     return;
   }
 
   const index = runtime.submissions.findIndex(
-    x => Number(x.week) === Number(week)
+    x => Number(x.week) === targetWeek
   );
 
   if (index >= 0) {
@@ -2029,7 +2379,7 @@ async function submitWeek(week) {
   );
 
   renderApp();
-  toast(`Week ${week} berhasil disubmit sebagai snapshot seluruh toolkit`);
+  toast(`Week ${targetWeek} berhasil disubmit`);
 }
 
 function renderWeeklySubmissionPage() {
@@ -2037,14 +2387,12 @@ function renderWeeklySubmissionPage() {
     <div class="card" style="margin-bottom:15px">
       <h3>Submit Progress Mingguan</h3>
       <p class="hint">
-        Setiap submission menyimpan snapshot seluruh data yang sedang ada
-        di Health Check, KPI, Problem Tree, Experiment, Customer Evidence,
-        Weekly Sprint, Financial, dan Portfolio.
+        Setiap Week memiliki 8 modulnya sendiri. Submit akan menyimpan
+        snapshot seluruh indikator pada Week yang sedang dibuka.
       </p>
       <div class="note">
-        Setelah dosen menandai sebuah Week sebagai Reviewed,
-        snapshot minggu tersebut dikunci. Perubahan untuk minggu berikutnya
-        tidak akan mengubah histori minggu yang sudah direview.
+        Setelah dosen menekan Review Keseluruhan, Week tersebut dikunci.
+        Week berikutnya tetap memiliki form baru dan tidak menimpa histori sebelumnya.
       </div>
     </div>
 
@@ -2061,10 +2409,10 @@ function renderSubmissionPanel() {
     <div class="card" style="margin-bottom:15px">
       <div class="section-head">
         <div>
-          <h3>Weekly Submission — Snapshot Seluruh Toolkit</h3>
+          <h3>Riwayat Week 1–16</h3>
           <p>
-            Week yang disubmit akan menyimpan seluruh kondisi data venture
-            pada saat tombol Submit ditekan.
+            Buka Week lama untuk melihat isi sebelumnya,
+            atau pindah ke Week baru untuk mengisi seluruh indikator dari awal.
           </p>
         </div>
 
@@ -2075,38 +2423,33 @@ function renderSubmissionPanel() {
         const week = i + 1;
         const submission = submissionFor(week);
         const status = submission?.status || 'draft';
-        const hasAnchor = sprintHasData(week);
         const feedback = feedbackFor(week);
+        const isActive = runtime.activeWeek === week;
 
-        let description = 'Isi Weekly Sprint minggu ini terlebih dahulu.';
-
-        if (hasAnchor && !submission) {
-          description = 'Siap menyimpan snapshot seluruh modul.';
-        }
+        let description = runtime.weeklyData?.[week]
+          ? 'Data Week tersedia.'
+          : 'Belum mulai.';
 
         if (submission?.submitted_at) {
-          const moduleCount = snapshotModuleCount(submission.snapshot);
-          description = `Snapshot dikirim ${prettyDate(submission.submitted_at)} · ${moduleCount || 8} modul`;
+          description = `${submissionStatusLabel(status)} · ${prettyDate(submission.submitted_at)}`;
         }
 
         return `
           <div class="metric"
-               style="align-items:flex-start;gap:12px">
+               style="
+                 align-items:flex-start;
+                 gap:12px;
+                 ${isActive ? 'outline:2px solid rgba(11,31,58,.12);border-radius:12px;padding:10px;' : ''}
+               ">
             <span style="min-width:0;flex:1">
-              <b>Week ${week}</b>
+              <b>Week ${week}${isActive ? ' · Sedang dibuka' : ''}</b>
               <div class="subtle">${description}</div>
 
               ${
                 feedback.length
-                  ? `
-                    <div class="note" style="margin-top:8px">
-                      <b>Review dosen:</b><br>
-                      ${feedback
-                        .slice(0, 2)
-                        .map(x => esc(x.message))
-                        .join('<br><br>')}
-                    </div>
-                  `
+                  ? `<div class="subtle" style="margin-top:4px">
+                       ${feedback.length} feedback dosen
+                     </div>`
                   : ''
               }
             </span>
@@ -2122,18 +2465,30 @@ function renderSubmissionPanel() {
                 ${submissionStatusLabel(status)}
               </span>
 
-              <button
-                class="btn small"
-                onclick="submitWeek(${week})"
-                ${!hasAnchor || status === 'reviewed' ? 'disabled' : ''}>
-                ${
-                  status === 'reviewed'
-                    ? 'Dikunci'
-                    : status === 'submitted'
-                      ? 'Update Snapshot'
-                      : 'Submit Semua'
-                }
-              </button>
+              ${
+                isActive
+                  ? `
+                    <button
+                      class="btn small primary"
+                      onclick="submitWeek(${week})"
+                      ${!weekHasMeaningfulData() || status === 'reviewed' ? 'disabled' : ''}>
+                      ${
+                        status === 'reviewed'
+                          ? 'Dikunci'
+                          : status === 'submitted'
+                            ? 'Update & Submit Ulang'
+                            : 'Submit Semua'
+                      }
+                    </button>
+                  `
+                  : `
+                    <button
+                      class="btn small"
+                      onclick="setActiveWeek(${week})">
+                      Buka Week
+                    </button>
+                  `
+              }
             </span>
           </div>
         `;
@@ -2144,13 +2499,15 @@ function renderSubmissionPanel() {
 
 
 function renderSprint() {
+  const index = Math.max(0, Number(runtime.activeWeek) - 1);
+  const r = runtime.modules.sprint[index];
+
   return `
     <div class="section-head">
       <div>
-        <h3>Weekly Sprint — 16 Weeks</h3>
+        <h3>Weekly Sprint — Week ${runtime.activeWeek}</h3>
         <p>
-          Current progress:
-          Week ${currentWeek(runtime.modules) || 0} / 16
+          Sprint ini khusus untuk workspace Week ${runtime.activeWeek}.
         </p>
       </div>
     </div>
@@ -2174,54 +2531,52 @@ function renderSprint() {
         </thead>
 
         <tbody>
-          ${runtime.modules.sprint.map((r, i) => `
-            <tr>
-              <td><b>W${r.week}</b></td>
+          <tr>
+            <td><b>W${r.week}</b></td>
 
-              ${[
-                'problem',
-                'hypothesis',
-                'experiment',
-                'kpi',
-                'baseline',
-                'target',
-                'result',
-                'learning'
-              ].map(k => `
-                <td>
-                  ${
-                    ['hypothesis', 'learning'].includes(k)
-                      ? `
-                        <textarea
-                          onchange="upd('sprint','${i}.${k}',this.value)">${esc(r[k])}</textarea>
-                      `
-                      : `
-                        <input
-                          value="${esc(r[k])}"
-                          onchange="upd('sprint','${i}.${k}',this.value)">
-                      `
-                  }
-                </td>
-              `).join('')}
-
+            ${[
+              'problem',
+              'hypothesis',
+              'experiment',
+              'kpi',
+              'baseline',
+              'target',
+              'result',
+              'learning'
+            ].map(k => `
               <td>
-                <select
-                  onchange="upd('sprint','${i}.decision',this.value)">
-                  <option value=""></option>
-                  ${['KEEP', 'MODIFY', 'PIVOT', 'STOP'].map(x => `
-                    <option ${r.decision === x ? 'selected' : ''}>
-                      ${x}
-                    </option>
-                  `).join('')}
-                </select>
+                ${
+                  ['hypothesis', 'learning'].includes(k)
+                    ? `
+                      <textarea
+                        onchange="upd('sprint','${index}.${k}',this.value)">${esc(r[k])}</textarea>
+                    `
+                    : `
+                      <input
+                        value="${esc(r[k])}"
+                        onchange="upd('sprint','${index}.${k}',this.value)">
+                    `
+                }
               </td>
+            `).join('')}
 
-              <td>
-                <textarea
-                  onchange="upd('sprint','${i}.nextMove',this.value)">${esc(r.nextMove)}</textarea>
-              </td>
-            </tr>
-          `).join('')}
+            <td>
+              <select
+                onchange="upd('sprint','${index}.decision',this.value)">
+                <option value=""></option>
+                ${['KEEP', 'MODIFY', 'PIVOT', 'STOP'].map(x => `
+                  <option ${r.decision === x ? 'selected' : ''}>
+                    ${x}
+                  </option>
+                `).join('')}
+              </select>
+            </td>
+
+            <td>
+              <textarea
+                onchange="upd('sprint','${index}.nextMove',this.value)">${esc(r.nextMove)}</textarea>
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -2330,14 +2685,18 @@ function renderFinancial() {
   `;
 }
 
+
 function renderPortfolio() {
+  const index = Math.max(0, Number(runtime.activeWeek) - 1);
+  const r = runtime.modules.portfolio[index];
+
   return `
     <div class="section-head">
       <div>
-        <h3>Venture Portfolio</h3>
+        <h3>Venture Portfolio — Week ${runtime.activeWeek}</h3>
         <p>
           Rekam perubahan, evidence, keputusan,
-          learning, dan next action.
+          learning, dan next action untuk Week ini.
         </p>
       </div>
     </div>
@@ -2356,24 +2715,22 @@ function renderPortfolio() {
         </thead>
 
         <tbody>
-          ${runtime.modules.portfolio.map((r, i) => `
-            <tr>
-              <td><b>W${r.week}</b></td>
+          <tr>
+            <td><b>W${r.week}</b></td>
 
-              ${[
-                'changed',
-                'evidence',
-                'decision',
-                'learned',
-                'next'
-              ].map(k => `
-                <td>
-                  <textarea
-                    onchange="upd('portfolio','${i}.${k}',this.value)">${esc(r[k])}</textarea>
-                </td>
-              `).join('')}
-            </tr>
-          `).join('')}
+            ${[
+              'changed',
+              'evidence',
+              'decision',
+              'learned',
+              'next'
+            ].map(k => `
+              <td>
+                <textarea
+                  onchange="upd('portfolio','${index}.${k}',this.value)">${esc(r[k])}</textarea>
+              </td>
+            `).join('')}
+          </tr>
         </tbody>
       </table>
     </div>
@@ -2419,6 +2776,7 @@ function scheduleSave(module) {
   );
 }
 
+
 async function saveModule(module) {
   if (runtime.mode === 'demo') {
     const demo = loadDemo();
@@ -2426,7 +2784,11 @@ async function saveModule(module) {
       x => x.id === runtime.demoStudentId
     );
 
+    runtime.weeklyData ??= {};
+    runtime.weeklyData[runtime.activeWeek] = runtime.modules;
+
     if (index >= 0) {
+      demo.students[index].weeklyData = runtime.weeklyData;
       demo.students[index].modules = runtime.modules;
       demo.students[index].venture = runtime.venture;
       demo.students[index].submissions = runtime.submissions;
@@ -2436,7 +2798,7 @@ async function saveModule(module) {
       runtime.classData = demo.students;
     }
 
-    toast('Tersimpan');
+    toast(`Week ${runtime.activeWeek} tersimpan`);
     return;
   }
 
@@ -2444,19 +2806,30 @@ async function saveModule(module) {
 }
 
 async function saveRealModule(module, silent = false) {
+  if (isWeekLocked(runtime.activeWeek)) {
+    if (!silent) {
+      toast(`Week ${runtime.activeWeek} sudah Reviewed dan tidak dapat diedit.`);
+    }
+    return false;
+  }
+
+  runtime.weeklyData ??= {};
+  runtime.weeklyData[runtime.activeWeek] = runtime.modules;
+
   const { error } = await sb
-    .from('module_data')
+    .from('weekly_module_data')
     .upsert({
       venture_id: runtime.venture.id,
+      week: Number(runtime.activeWeek),
       module_name: module,
       payload: runtime.modules[module],
       updated_at: nowISO()
     }, {
-      onConflict: 'venture_id,module_name'
+      onConflict: 'venture_id,week,module_name'
     });
 
   if (error) {
-    console.error('[save module]', error);
+    console.error('[save weekly module]', error);
 
     if (!silent) {
       toast(error.message);
@@ -2466,7 +2839,7 @@ async function saveRealModule(module, silent = false) {
   }
 
   if (!silent) {
-    toast('Tersimpan ke cloud');
+    toast(`Week ${runtime.activeWeek} tersimpan ke cloud`);
   }
 
   return true;
@@ -3198,6 +3571,70 @@ function weeklySnapshotModules(student, week) {
   return submission?.snapshot?.modules || student?.modules || defaultModules(0);
 }
 
+
+function renderReviewCommentBox(student, week, moduleName, fieldPath) {
+  const existing = feedbackForIndicator(
+    student,
+    week,
+    moduleName,
+    fieldPath
+  );
+
+  const submission = weeklySubmissionForStudent(student, week);
+
+  if (submission?.status === 'reviewed') {
+    return existing
+      ? `
+        <div class="note" style="margin:8px 0 12px">
+          <b>Komentar dosen:</b><br>
+          ${esc(existing.message)}
+        </div>
+      `
+      : '';
+  }
+
+  return `
+    <div class="field" style="margin:8px 0 12px">
+      <label>Komentar indikator (opsional)</label>
+      <textarea
+        class="review-comment"
+        data-student="${student.id}"
+        data-week="${week}"
+        data-module="${moduleName}"
+        data-path="${fieldPath}"
+        placeholder="Isi hanya jika ada masukan...">${esc(existing?.message || '')}</textarea>
+    </div>
+  `;
+}
+
+function renderReviewMetricList(title, moduleName, items, student, week) {
+  return `
+    <div class="card" style="margin-bottom:12px">
+      <h3>${title}</h3>
+
+      ${items.map(([label, value, fieldPath]) => `
+        <div class="metric">
+          <span>${label}</span>
+          <strong style="
+            max-width:68%;
+            text-align:right;
+            white-space:normal;
+          ">
+            ${esc(filled(value) ? value : '-')}
+          </strong>
+        </div>
+
+        ${renderReviewCommentBox(
+          student,
+          week,
+          moduleName,
+          fieldPath
+        )}
+      `).join('')}
+    </div>
+  `;
+}
+
 function renderSnapshotMetricList(title, items) {
   return `
     <div class="card" style="margin-bottom:12px">
@@ -3218,14 +3655,15 @@ function renderSnapshotMetricList(title, items) {
   `;
 }
 
-function renderSnapshotHealth(modules) {
+
+function renderSnapshotHealth(modules, student, week) {
   const rows = modules?.health || [];
 
   return `
     <div class="card" style="margin-bottom:12px">
       <h3>01 · Health Check</h3>
 
-      ${rows.map(row => `
+      ${rows.map((row, index) => `
         <div class="metric">
           <span>
             <b>${esc(row.area || '-')}</b>
@@ -3244,12 +3682,20 @@ function renderSnapshotHealth(modules) {
             ${num(row.score) || 0}/5
           </span>
         </div>
+
+        ${renderReviewCommentBox(
+          student,
+          week,
+          'health',
+          `health.${index}`
+        )}
       `).join('')}
     </div>
   `;
 }
 
-function renderSnapshotKPI(modules) {
+
+function renderSnapshotKPI(modules, student, week) {
   const rows = modules?.kpi || [];
 
   return `
@@ -3271,7 +3717,7 @@ function renderSnapshotKPI(modules) {
           </thead>
 
           <tbody>
-            ${rows.map(row => `
+            ${rows.map((row, index) => `
               <tr>
                 <td>
                   <b>${esc(row.kpi || '-')}</b>
@@ -3286,6 +3732,16 @@ function renderSnapshotKPI(modules) {
                 <td>${esc(row.source || '-')}</td>
                 <td>${esc(row.notes || '-')}</td>
               </tr>
+              <tr>
+                <td colspan="7">
+                  ${renderReviewCommentBox(
+                    student,
+                    week,
+                    'kpi',
+                    `kpi.${index}`
+                  )}
+                </td>
+              </tr>
             `).join('')}
           </tbody>
         </table>
@@ -3294,54 +3750,63 @@ function renderSnapshotKPI(modules) {
   `;
 }
 
-function renderSnapshotProblem(modules) {
+
+function renderSnapshotProblem(modules, student, week) {
   const p = modules?.problem || {};
 
-  return renderSnapshotMetricList(
+  return renderReviewMetricList(
     '03 · Problem Tree',
+    'problem',
     [
-      ['Core Problem', p.coreProblem],
-      ['Symptom', p.symptom],
-      ['WHY #1', p.why1],
-      ['WHY #2', p.why2],
-      ['WHY #3', p.why3],
-      ['Root Cause', p.rootCause],
-      ['Consequence', p.consequence],
-      ['Priority Problem', p.priorityProblem],
-      ['Next Sprint Hypothesis', p.hypothesis],
-      ['KPI', p.kpi],
-      ['Deadline', p.deadline]
-    ]
+      ['Core Problem', p.coreProblem, 'problem.coreProblem'],
+      ['Symptom', p.symptom, 'problem.symptom'],
+      ['WHY #1', p.why1, 'problem.why1'],
+      ['WHY #2', p.why2, 'problem.why2'],
+      ['WHY #3', p.why3, 'problem.why3'],
+      ['Root Cause', p.rootCause, 'problem.rootCause'],
+      ['Consequence', p.consequence, 'problem.consequence'],
+      ['Priority Problem', p.priorityProblem, 'problem.priorityProblem'],
+      ['Next Sprint Hypothesis', p.hypothesis, 'problem.hypothesis'],
+      ['KPI', p.kpi, 'problem.kpi'],
+      ['Deadline', p.deadline, 'problem.deadline']
+    ],
+    student,
+    week
   );
 }
 
-function renderSnapshotExperiment(modules) {
+
+function renderSnapshotExperiment(modules, student, week) {
   const e = modules?.experiment || {};
 
-  return renderSnapshotMetricList(
+  return renderReviewMetricList(
     '04 · Experiment Card',
+    'experiment',
     [
-      ['Experiment Name', e.name],
-      ['Problem', e.problem],
-      ['Hypothesis', e.hypothesis],
-      ['Target Customer', e.targetCustomer],
-      ['Action', e.action],
-      ['Success Metric', e.successMetric],
-      ['Baseline', e.baseline],
-      ['Target', e.target],
-      ['Duration', e.duration],
-      ['Sample Size', e.sampleSize],
-      ['Expected Cost', e.expectedCost],
-      ['Evidence', e.evidence],
-      ['Result', e.result],
-      ['Learning', e.learning],
-      ['Decision', e.decision],
-      ['Next Experiment', e.nextExperiment]
-    ]
+      ['Experiment Name', e.name, 'experiment.name'],
+      ['Problem', e.problem, 'experiment.problem'],
+      ['Hypothesis', e.hypothesis, 'experiment.hypothesis'],
+      ['Target Customer', e.targetCustomer, 'experiment.targetCustomer'],
+      ['Action', e.action, 'experiment.action'],
+      ['Success Metric', e.successMetric, 'experiment.successMetric'],
+      ['Baseline', e.baseline, 'experiment.baseline'],
+      ['Target', e.target, 'experiment.target'],
+      ['Duration', e.duration, 'experiment.duration'],
+      ['Sample Size', e.sampleSize, 'experiment.sampleSize'],
+      ['Expected Cost', e.expectedCost, 'experiment.expectedCost'],
+      ['Evidence', e.evidence, 'experiment.evidence'],
+      ['Result', e.result, 'experiment.result'],
+      ['Learning', e.learning, 'experiment.learning'],
+      ['Decision', e.decision, 'experiment.decision'],
+      ['Next Experiment', e.nextExperiment, 'experiment.nextExperiment']
+    ],
+    student,
+    week
   );
 }
 
-function renderSnapshotEvidence(modules) {
+
+function renderSnapshotEvidence(modules, student, week) {
   const rows = (modules?.evidence || []).filter(
     row =>
       filled(row.customer) ||
@@ -3356,7 +3821,7 @@ function renderSnapshotEvidence(modules) {
 
       ${
         rows.length
-          ? rows.map(row => `
+          ? rows.map((row, index) => `
               <div class="metric">
                 <span>
                   <b>${esc(row.customer || '-')}</b>
@@ -3381,6 +3846,13 @@ function renderSnapshotEvidence(modules) {
                   Pain ${num(row.pain) || 0}
                 </span>
               </div>
+
+              ${renderReviewCommentBox(
+                student,
+                week,
+                'evidence',
+                `evidence.${index}`
+              )}
             `).join('')
           : `<div class="empty">Belum ada evidence.</div>`
       }
@@ -3388,29 +3860,34 @@ function renderSnapshotEvidence(modules) {
   `;
 }
 
-function renderSnapshotSprint(modules, week) {
+
+function renderSnapshotSprint(modules, week, student) {
   const row = (modules?.sprint || []).find(
     item => Number(item.week) === Number(week)
   ) || {};
 
-  return renderSnapshotMetricList(
+  return renderReviewMetricList(
     `06 · Weekly Sprint — Week ${week}`,
+    'sprint',
     [
-      ['Priority Problem', row.problem],
-      ['Hypothesis', row.hypothesis],
-      ['Experiment', row.experiment],
-      ['KPI', row.kpi],
-      ['Baseline', row.baseline],
-      ['Target', row.target],
-      ['Result', row.result],
-      ['Learning', row.learning],
-      ['Decision', row.decision],
-      ['Next Move', row.nextMove]
-    ]
+      ['Priority Problem', row.problem, `sprint.${week}.problem`],
+      ['Hypothesis', row.hypothesis, `sprint.${week}.hypothesis`],
+      ['Experiment', row.experiment, `sprint.${week}.experiment`],
+      ['KPI', row.kpi, `sprint.${week}.kpi`],
+      ['Baseline', row.baseline, `sprint.${week}.baseline`],
+      ['Target', row.target, `sprint.${week}.target`],
+      ['Result', row.result, `sprint.${week}.result`],
+      ['Learning', row.learning, `sprint.${week}.learning`],
+      ['Decision', row.decision, `sprint.${week}.decision`],
+      ['Next Move', row.nextMove, `sprint.${week}.nextMove`]
+    ],
+    student,
+    week
   );
 }
 
-function renderSnapshotFinancial(modules) {
+
+function renderSnapshotFinancial(modules, student, week) {
   const rows = modules?.financial?.months || [];
 
   return `
@@ -3431,7 +3908,7 @@ function renderSnapshotFinancial(modules) {
           </thead>
 
           <tbody>
-            ${rows.map(row => {
+            ${rows.map((row, index) => {
               const net =
                 num(row.revenue) -
                 num(row.cogs) -
@@ -3450,6 +3927,16 @@ function renderSnapshotFinancial(modules) {
                   <td>${money(net)}</td>
                   <td>${money(cashFlow)}</td>
                 </tr>
+                <tr>
+                  <td colspan="6">
+                    ${renderReviewCommentBox(
+                      student,
+                      week,
+                      'financial',
+                      `financial.months.${index}`
+                    )}
+                  </td>
+                </tr>
               `;
             }).join('')}
           </tbody>
@@ -3459,22 +3946,27 @@ function renderSnapshotFinancial(modules) {
   `;
 }
 
-function renderSnapshotPortfolio(modules, week) {
+
+function renderSnapshotPortfolio(modules, week, student) {
   const row = (modules?.portfolio || []).find(
     item => Number(item.week) === Number(week)
   ) || {};
 
-  return renderSnapshotMetricList(
+  return renderReviewMetricList(
     `08 · Venture Portfolio — Week ${week}`,
+    'portfolio',
     [
-      ['What Changed?', row.changed],
-      ['Data / Evidence', row.evidence],
-      ['Decision', row.decision],
-      ['Learning', row.learned],
-      ['Next Action', row.next]
-    ]
+      ['What Changed?', row.changed, `portfolio.${week}.changed`],
+      ['Data / Evidence', row.evidence, `portfolio.${week}.evidence`],
+      ['Decision', row.decision, `portfolio.${week}.decision`],
+      ['Learning', row.learned, `portfolio.${week}.learned`],
+      ['Next Action', row.next, `portfolio.${week}.next`]
+    ],
+    student,
+    week
   );
 }
+
 
 async function reviewWholeWeek(studentId, week) {
   if (runtime.role !== 'lecturer') {
@@ -3501,27 +3993,65 @@ async function reviewWholeWeek(studentId, week) {
     return;
   }
 
-  const input = document.getElementById(
+  const commentInputs = [
+    ...document.querySelectorAll(
+      `.review-comment[data-student="${studentId}"][data-week="${week}"]`
+    )
+  ];
+
+  const overallInput = document.getElementById(
     `overall-review-${studentId}-${week}`
   );
 
-  const message = String(input?.value || '').trim();
+  const commentDrafts = commentInputs
+    .map(input => ({
+      module_name: input.dataset.module || null,
+      field_path: input.dataset.path || null,
+      message: String(input.value || '').trim()
+    }))
+    .filter(item => item.message);
+
+  const overallMessage = String(
+    overallInput?.value || ''
+  ).trim();
+
+  if (overallMessage) {
+    commentDrafts.push({
+      module_name: null,
+      field_path: null,
+      message: overallMessage
+    });
+  }
+
   const now = nowISO();
 
   if (runtime.mode === 'demo') {
-    if (message) {
-      const feedbackRow = {
-        id: `demo-feedback-${Date.now()}`,
-        venture_id: student.venture.id,
-        lecturer_id: runtime.profile.id,
-        module_name: null,
-        week: Number(week),
-        message,
-        created_at: now
-      };
+    student.feedback ??= [];
 
-      student.feedback ??= [];
-      student.feedback.unshift(feedbackRow);
+    for (const draft of commentDrafts) {
+      const existing = feedbackForIndicator(
+        student,
+        week,
+        draft.module_name,
+        draft.field_path
+      );
+
+      if (existing) {
+        existing.message = draft.message;
+        existing.updated_at = now;
+      } else {
+        student.feedback.unshift({
+          id: `demo-feedback-${Date.now()}-${Math.random()}`,
+          venture_id: student.venture.id,
+          lecturer_id: runtime.profile.id,
+          module_name: draft.module_name,
+          field_path: draft.field_path,
+          week: Number(week),
+          message: draft.message,
+          created_at: now,
+          updated_at: now
+        });
+      }
     }
 
     submission.status = 'reviewed';
@@ -3540,32 +4070,65 @@ async function reviewWholeWeek(studentId, week) {
     }
 
     renderApp();
-    toast(`Week ${week} selesai direview secara keseluruhan`);
+    toast(`Week ${week} selesai direview`);
     return;
   }
 
-  let feedbackRow = null;
+  for (const draft of commentDrafts) {
+    const existing = feedbackForIndicator(
+      student,
+      week,
+      draft.module_name,
+      draft.field_path
+    );
 
-  if (message) {
-    const feedbackResult = await sb
-      .from('lecturer_feedback')
-      .insert({
-        venture_id: student.venture.id,
-        lecturer_id: runtime.profile.id,
-        module_name: null,
-        week: Number(week),
-        message
-      })
-      .select()
-      .single();
+    let result;
 
-    if (feedbackResult.error) {
-      console.error('[overall review feedback]', feedbackResult.error);
-      toast(`Gagal menyimpan feedback: ${feedbackResult.error.message}`);
+    if (existing) {
+      result = await sb
+        .from('lecturer_feedback')
+        .update({
+          message: draft.message,
+          updated_at: now
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+    } else {
+      result = await sb
+        .from('lecturer_feedback')
+        .insert({
+          venture_id: student.venture.id,
+          lecturer_id: runtime.profile.id,
+          module_name: draft.module_name,
+          field_path: draft.field_path,
+          week: Number(week),
+          message: draft.message,
+          updated_at: now
+        })
+        .select()
+        .single();
+    }
+
+    if (result.error) {
+      console.error('[indicator feedback]', result.error);
+      toast(`Gagal menyimpan komentar: ${result.error.message}`);
       return;
     }
 
-    feedbackRow = feedbackResult.data;
+    student.feedback ??= [];
+
+    if (existing) {
+      const feedbackIndex = student.feedback.findIndex(
+        row => row.id === existing.id
+      );
+
+      if (feedbackIndex >= 0) {
+        student.feedback[feedbackIndex] = result.data;
+      }
+    } else {
+      student.feedback.unshift(result.data);
+    }
   }
 
   const { data, error } = await sb
@@ -3582,7 +4145,7 @@ async function reviewWholeWeek(studentId, week) {
 
   if (error) {
     console.error('[overall review status]', error);
-    toast(`Feedback tersimpan, tetapi status review gagal: ${error.message}`);
+    toast(`Komentar tersimpan, tetapi status review gagal: ${error.message}`);
     return;
   }
 
@@ -3594,14 +4157,10 @@ async function reviewWholeWeek(studentId, week) {
     student.submissions[index] = data;
   }
 
-  if (feedbackRow) {
-    student.feedback ??= [];
-    student.feedback.unshift(feedbackRow);
-  }
-
   renderApp();
   toast(`Week ${week} selesai direview secara keseluruhan`);
 }
+
 
 function renderWeeklySnapshotReview(student, week) {
   const submission = weeklySubmissionForStudent(student, week);
@@ -3617,19 +4176,28 @@ function renderWeeklySnapshotReview(student, week) {
   }
 
   const modules = weeklySnapshotModules(student, week);
-  const feedback = weeklyFeedbackForStudent(student, week);
 
-  const ventureSnapshot = submission?.snapshot?.venture || student.venture || {};
+  const ventureSnapshot =
+    submission?.snapshot?.venture ||
+    student.venture ||
+    {};
+
+  const overallFeedback = feedbackForIndicator(
+    student,
+    week,
+    null,
+    null
+  );
 
   return `
     <div class="card" style="margin-bottom:12px">
       <div class="section-head">
         <div>
-          <h3>Review Keseluruhan · Week ${week}</h3>
+          <h3>Review Week ${week}</h3>
           <p>
             Snapshot dikirim ${prettyDate(submission.submitted_at)}.
-            Data di bawah adalah kondisi seluruh toolkit saat mahasiswa
-            menekan Submit Week ${week}.
+            Dosen dapat memberi komentar hanya pada indikator yang perlu,
+            lalu menyelesaikan satu Review Keseluruhan.
           </p>
         </div>
 
@@ -3643,88 +4211,71 @@ function renderWeeklySnapshotReview(student, week) {
           <span>Venture</span>
           <strong>${esc(ventureSnapshot.venture_name || student.venture?.venture_name || '-')}</strong>
         </div>
+
         <div class="metric">
           <span>Category</span>
           <strong>${esc(ventureSnapshot.category || student.venture?.category || '-')}</strong>
         </div>
       </div>
-
-      ${
-        !submission.snapshot?.modules
-          ? `
-            <div class="note" style="margin-top:10px">
-              Snapshot lama tidak tersedia penuh; tampilan menggunakan
-              data live sebagai fallback.
-            </div>
-          `
-          : ''
-      }
     </div>
 
-    ${renderSnapshotHealth(modules)}
-    ${renderSnapshotKPI(modules)}
-    ${renderSnapshotProblem(modules)}
-    ${renderSnapshotExperiment(modules)}
-    ${renderSnapshotEvidence(modules)}
-    ${renderSnapshotSprint(modules, week)}
-    ${renderSnapshotFinancial(modules)}
-    ${renderSnapshotPortfolio(modules, week)}
+    ${renderSnapshotHealth(modules, student, week)}
+    ${renderSnapshotKPI(modules, student, week)}
+    ${renderSnapshotProblem(modules, student, week)}
+    ${renderSnapshotExperiment(modules, student, week)}
+    ${renderSnapshotEvidence(modules, student, week)}
+    ${renderSnapshotSprint(modules, week, student)}
+    ${renderSnapshotFinancial(modules, student, week)}
+    ${renderSnapshotPortfolio(modules, week, student)}
 
     <div class="card">
       <div class="section-head">
         <div>
           <h3>Review Keseluruhan Week ${week}</h3>
           <p>
-            Satu review berlaku untuk seluruh snapshot minggu ini.
+            Komentar keseluruhan juga opsional.
+            Tombol di bawah menyelesaikan review untuk seluruh Week.
           </p>
         </div>
       </div>
 
       ${
-        feedback.length
-          ? `
-            <div style="margin-bottom:12px">
-              ${feedback.map(item => `
-                <div class="note" style="margin-bottom:8px">
-                  ${esc(item.message)}
-                  <div class="subtle" style="margin-top:4px">
-                    ${prettyDate(item.created_at)}
-                  </div>
-                </div>
-              `).join('')}
-            </div>
-          `
-          : ''
-      }
-
-      ${
         submission.status === 'reviewed'
           ? `
+            ${
+              overallFeedback
+                ? `
+                  <div class="note" style="margin-bottom:10px">
+                    <b>Komentar keseluruhan:</b><br>
+                    ${esc(overallFeedback.message)}
+                  </div>
+                `
+                : ''
+            }
+
             <div class="note">
-              Submission Week ${week} sudah selesai direview
-              dan snapshot mahasiswa telah dikunci.
+              Week ${week} sudah selesai direview dan dikunci.
             </div>
           `
           : `
             <div class="field">
-              <label>Catatan / Feedback Keseluruhan (opsional)</label>
+              <label>Komentar Keseluruhan (opsional)</label>
               <textarea
                 id="overall-review-${student.id}-${week}"
-                placeholder="Tuliskan evaluasi keseluruhan untuk Week ${week}..."></textarea>
+                placeholder="Isi hanya jika ada masukan umum...">${esc(overallFeedback?.message || '')}</textarea>
             </div>
 
             <button
               class="btn primary"
               style="margin-top:10px"
               onclick="reviewWholeWeek('${student.id}',${week})">
-              Review Keseluruhan Week ${week}
+              Submit Review Keseluruhan Week ${week}
             </button>
           `
       }
     </div>
   `;
 }
-
 
 /* ============================================================
    STUDENT DETAIL
