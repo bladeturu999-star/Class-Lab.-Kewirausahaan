@@ -249,3 +249,152 @@ async function init(){
   renderAuth();
 }
 init();
+TOOLKIT v3.1 — INTEGRATED WEEKLY SUBMISSION
+   Tempelkan blok ini di PALING BAWAH app.js, setelah init();
+   ============================================================ */
+(() => {
+  'use strict';
+
+  if (window.__TOOLKIT_V31_LOADED__) return;
+  window.__TOOLKIT_V31_LOADED__ = true;
+
+  const V3_VERSION = '3.1';
+
+  runtime.v3Submissions = runtime.v3Submissions || [];
+
+  function v31StatusLabel(status) {
+    if (status === 'reviewed') return 'Reviewed';
+    if (status === 'submitted') return 'Submitted';
+    return 'Draft';
+  }
+
+  function v31StatusClass(status) {
+    if (status === 'reviewed') return 'good';
+    if (status === 'submitted') return 'warn';
+    return 'neutral';
+  }
+
+  function v31Date(iso) {
+    if (!iso) return '-';
+    try {
+      return new Intl.DateTimeFormat('id-ID', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      }).format(new Date(iso));
+    } catch {
+      return '-';
+    }
+  }
+
+  function v31HasSprintData(week) {
+    const row = runtime.modules?.sprint?.find(
+      x => Number(x.week) === Number(week)
+    );
+
+    if (!row) return false;
+
+    return Object.entries(row).some(
+      ([key, value]) => key !== 'week' && filled(value)
+    );
+  }
+
+  function v31SubmissionFor(week) {
+    return (runtime.v3Submissions || []).find(
+      row => Number(row.week) === Number(week)
+    ) || null;
+  }
+
+  async function v31LoadSubmissions() {
+    if (
+      !REAL_READY ||
+      runtime.mode !== 'real' ||
+      runtime.role !== 'student' ||
+      !runtime.venture?.id
+    ) {
+      return;
+    }
+
+    const { data, error } = await sb
+      .from('weekly_submissions')
+      .select('*')
+      .eq('venture_id', runtime.venture.id)
+      .order('week');
+
+    if (error) {
+      console.error('[Toolkit v3.1] load submissions:', error);
+      toast(error.message);
+      return;
+    }
+
+    runtime.v3Submissions = data || [];
+  }
+
+  window.v31SubmitWeek = async function (week) {
+    if (!REAL_READY || runtime.mode !== 'real') {
+      return toast('Submission hanya tersedia di Cloud Mode.');
+    }
+
+    if (runtime.role !== 'student') {
+      return toast('Submission ini hanya untuk mahasiswa.');
+    }
+
+    if (!runtime.venture?.id) {
+      return toast('Venture belum tersedia.');
+    }
+
+    if (!v31HasSprintData(week)) {
+      return toast(`Isi Weekly Sprint Week ${week} terlebih dahulu.`);
+    }
+
+    const existing = v31SubmissionFor(week);
+
+    if (existing?.status === 'reviewed') {
+      return toast(`Week ${week} sudah direview dosen.`);
+    }
+
+    // Pastikan data sprint paling baru sudah tersimpan lebih dulu.
+    await saveRealModule('sprint', true);
+
+    const now = nowISO();
+
+    const payload = {
+      venture_id: runtime.venture.id,
+      week: Number(week),
+      status: 'submitted',
+      submitted_at: existing?.submitted_at || now,
+      reviewed_at: null,
+      updated_at: now
+    };
+
+    const { data, error } = await sb
+      .from('weekly_submissions')
+      .upsert(payload, {
+        onConflict: 'venture_id,week'
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('[Toolkit v3.1] submit error:', error);
+      return toast(`Gagal submit: ${error.message}`);
+    }
+
+    const index = runtime.v3Submissions.findIndex(
+      row => Number(row.week) === Number(week)
+    );
+
+    if (index >= 0) {
+      runtime.v3Submissions[index] = data;
+    } else {
+      runtime.v3Submissions.push(data);
+    }
+
+    runtime.v3Submissions.sort(
+      (a, b) => Number(a.week) - Number(b.week)
+    );
+
+    renderApp();
+
