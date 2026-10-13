@@ -1376,29 +1376,29 @@ function renderStudentPage() {
     case 'submission':
       return renderWeeklySubmissionPage();
     case 'health':
-      return renderHealth();
+      return renderHealth() + renderModuleFeedback('health');
     case 'kpi':
-      return renderKPI();
+      return renderKPI() + renderModuleFeedback('kpi');
     case 'problem':
       return renderObjectForm(
         'problem',
         'Problem Tree',
         problemFields()
-      );
+      ) + renderModuleFeedback('problem');
     case 'experiment':
       return renderObjectForm(
         'experiment',
         'Experiment Card',
         experimentFields()
-      );
+      ) + renderModuleFeedback('experiment');
     case 'evidence':
-      return renderEvidence();
+      return renderEvidence() + renderModuleFeedback('evidence');
     case 'sprint':
-      return renderSprint();
+      return renderSprint() + renderModuleFeedback('sprint');
     case 'financial':
-      return renderFinancial();
+      return renderFinancial() + renderModuleFeedback('financial');
     case 'portfolio':
-      return renderPortfolio();
+      return renderPortfolio() + renderModuleFeedback('portfolio');
     default:
       return renderStudentOverview();
   }
@@ -2123,6 +2123,42 @@ function weekHasMeaningfulData() {
   )) return true;
 
   return false;
+}
+
+function renderModuleFeedback(moduleName) {
+  const rows = feedbackFor(runtime.activeWeek).filter(
+    row => !row.module_name || row.module_name === moduleName
+  );
+
+  if (!rows.length) {
+    return '';
+  }
+
+  const moduleLabels = {
+    health: 'Health Check',
+    kpi: 'Baseline KPI',
+    problem: 'Problem Tree',
+    experiment: 'Experiment',
+    evidence: 'Customer Evidence',
+    sprint: 'Weekly Sprint',
+    financial: 'Financial',
+    portfolio: 'Portfolio'
+  };
+
+  return `
+    <div class="card" style="margin-top:15px">
+      <h3>Feedback Dosen · ${moduleLabels[moduleName] || moduleName}</h3>
+      ${rows.map(row => `
+        <div class="note" style="margin-top:8px">
+          <b>${esc(feedbackLabel(row))}</b><br>
+          ${esc(row.message)}
+          <div class="subtle" style="margin-top:4px">
+            ${prettyDate(row.updated_at || row.created_at)}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
 }
 
 function renderStudentWeekFeedback() {

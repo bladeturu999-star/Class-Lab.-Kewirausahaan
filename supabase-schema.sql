@@ -36,6 +36,20 @@ create table if not exists public.module_data (
   unique (venture_id, module_name)
 );
 
+-- Data modul per minggu (Week 1-16). Dipakai dashboard modern
+-- yang menyimpan isian terpisah untuk setiap minggu workspace.
+create table if not exists public.weekly_module_data (
+  id bigint generated always as identity primary key,
+  venture_id uuid not null references public.ventures(id) on delete cascade,
+  week integer not null check (week between 1 and 16),
+  module_name text not null check (
+    module_name in ('health','kpi','problem','experiment','evidence','sprint','financial','portfolio')
+  ),
+  payload jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(),
+  unique (venture_id, week, module_name)
+);
+
 create table if not exists public.weekly_submissions (
   id bigint generated always as identity primary key,
   venture_id uuid not null references public.ventures(id) on delete cascade,
@@ -55,6 +69,7 @@ create table if not exists public.lecturer_feedback (
     module_name is null
     or module_name in ('health','kpi','problem','experiment','evidence','sprint','financial','portfolio')
   ),
+  field_path text,
   week integer check (week is null or week between 1 and 16),
   message text not null,
   created_at timestamptz not null default now(),
@@ -133,6 +148,7 @@ on conflict (id) do nothing;
 alter table public.profiles enable row level security;
 alter table public.ventures enable row level security;
 alter table public.module_data enable row level security;
+alter table public.weekly_module_data enable row level security;
 alter table public.weekly_submissions enable row level security;
 alter table public.lecturer_feedback enable row level security;
 
@@ -144,6 +160,9 @@ drop policy if exists venture_update_owner on public.ventures;
 drop policy if exists module_select_owner_or_lecturer on public.module_data;
 drop policy if exists module_insert_owner on public.module_data;
 drop policy if exists module_update_owner on public.module_data;
+drop policy if exists weekly_module_select_owner_or_lecturer on public.weekly_module_data;
+drop policy if exists weekly_module_insert_owner on public.weekly_module_data;
+drop policy if exists weekly_module_update_owner on public.weekly_module_data;
 drop policy if exists submission_select_owner_or_lecturer on public.weekly_submissions;
 drop policy if exists submission_insert_owner on public.weekly_submissions;
 drop policy if exists submission_update_owner on public.weekly_submissions;
@@ -229,6 +248,54 @@ with check (
     select 1
     from public.ventures v
     where v.id = module_data.venture_id
+      and v.student_id = (select auth.uid())
+  )
+);
+
+create policy weekly_module_select_owner_or_lecturer
+on public.weekly_module_data
+for select
+to authenticated
+using (
+  private.is_lecturer()
+  or exists (
+    select 1
+    from public.ventures v
+    where v.id = weekly_module_data.venture_id
+      and v.student_id = (select auth.uid())
+  )
+);
+
+create policy weekly_module_insert_owner
+on public.weekly_module_data
+for insert
+to authenticated
+with check (
+  exists (
+    select 1
+    from public.ventures v
+    where v.id = weekly_module_data.venture_id
+      and v.student_id = (select auth.uid())
+  )
+);
+
+create policy weekly_module_update_owner
+on public.weekly_module_data
+for update
+to authenticated
+using (
+  exists (
+    select 1
+    from public.ventures v
+    where v.id = weekly_module_data.venture_id
+      and v.student_id = (select auth.uid())
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.ventures v
+    where v.id = weekly_module_data.venture_id
       and v.student_id = (select auth.uid())
   )
 );
@@ -345,6 +412,7 @@ using (
 revoke all on table public.profiles from anon, authenticated;
 revoke all on table public.ventures from anon, authenticated;
 revoke all on table public.module_data from anon, authenticated;
+revoke all on table public.weekly_module_data from anon, authenticated;
 revoke all on table public.weekly_submissions from anon, authenticated;
 revoke all on table public.lecturer_feedback from anon, authenticated;
 
@@ -354,16 +422,28 @@ on public.profiles to authenticated;
 
 grant select, insert, update on public.ventures to authenticated;
 grant select, insert, update on public.module_data to authenticated;
+grant select, insert, update on public.weekly_module_data to authenticated;
 grant select, insert, update on public.weekly_submissions to authenticated;
 grant select, insert, update, delete on public.lecturer_feedback to authenticated;
 
 grant usage, select on all sequences in schema public to authenticated;
+
+-- Upgrade: tambahkan kolom field_path untuk komentar per indikator
+-- pada database yang sudah pernah membuat lecturer_feedback tanpa kolom ini.
+alter table public.lecturer_feedback
+add column if not exists field_path text;
 
 create index if not exists idx_ventures_student
 on public.ventures(student_id);
 
 create index if not exists idx_module_data_venture
 on public.module_data(venture_id);
+
+create index if not exists idx_weekly_module_data_venture
+on public.weekly_module_data(venture_id);
+
+create index if not exists idx_weekly_module_data_week
+on public.weekly_module_data(venture_id, week);
 
 create index if not exists idx_weekly_submissions_venture
 on public.weekly_submissions(venture_id);

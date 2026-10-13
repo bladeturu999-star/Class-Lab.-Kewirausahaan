@@ -149,19 +149,22 @@ auth.users
    └── profiles
           │ 1:1
           └── ventures
-                 │
-                 ├── module_data
-                 │      ├── health
-                 │      ├── kpi
-                 │      ├── problem
-                 │      ├── experiment
-                 │      ├── evidence
-                 │      ├── sprint
-                 │      ├── financial
-                 │      └── portfolio
-                 │
-                 ├── weekly_submissions
-                 └── lecturer_feedback
+                      │
+                      ├── module_data
+                      │      ├── health
+                      │      ├── kpi
+                      │      ├── problem
+                      │      ├── experiment
+                      │      ├── evidence
+                      │      ├── sprint
+                      │      ├── financial
+                      │      └── portfolio
+                      │
+                      ├── weekly_module_data
+                      │      └── payload per Week 1-16 (JSONB)
+                      │
+                      ├── weekly_submissions
+                      └── lecturer_feedback
 ```
 
 `module_data.payload` menggunakan JSONB agar struktur toolkit dapat berkembang tanpa perlu mengubah tabel setiap kali ada revisi kolom.
@@ -183,9 +186,9 @@ Untuk Vercel, upload folder/project dan jadikan root berisi `index.html`.
 # Roadmap v2.x
 
 Fondasi database untuk fitur berikut sudah disiapkan, tetapi UI finalnya belum seluruhnya diaktifkan pada v2.0:
-- Submit Week → Draft / Submitted / Reviewed
-- Lecturer feedback per minggu / modul
-- komentar dosen di Student Detail
+- ~~Submit Week → Draft / Submitted / Reviewed~~ (aktif di v3.4)
+- ~~Lecturer feedback per minggu / modul~~ (aktif di v3.4)
+- ~~komentar dosen di Student Detail~~ (aktif di v3.4)
 - export report PDF per mahasiswa
 - class report PDF
 - deadline reminder
